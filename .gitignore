@@ -1,0 +1,4 @@
+.setup.env
+.DS_Store
+supabase/.temp/
+supabase/.branches/
