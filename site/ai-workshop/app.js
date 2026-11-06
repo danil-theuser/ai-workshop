@@ -49,38 +49,93 @@ function extractHtml(raw) {
   return t;
 }
 
+// A desktop-style window. `title` and `body` are HTML (escape before passing).
+function win(title, body, { icon = "🗔", cls = "", id = "", status = "", controls = true } = {}) {
+  return `
+    <section class="window ${cls}"${id ? ` id="${id}"` : ""}>
+      <div class="title-bar">
+        <div class="title-bar-text"><span class="ti" aria-hidden="true">${icon}</span><span>${title}</span></div>
+        ${controls ? `<div class="title-bar-controls">
+          <button type="button" class="tb-min" data-win="min" aria-label="Minimize" title="Minimize"></button>
+          <button type="button" class="tb-max" data-win="max" aria-label="Maximize" title="Maximize"></button>
+        </div>` : ""}
+      </div>
+      <div class="window-body">${body}</div>
+      ${status ? `<div class="status-bar">${status}</div>` : ""}
+    </section>`;
+}
+
+// Window buttons: minimize rolls a window up, maximize fills the screen.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-win]");
+  if (!b) return;
+  const w = b.closest(".window");
+  if (b.dataset.win === "min") { w.classList.toggle("minimized"); w.classList.remove("maximized"); }
+  if (b.dataset.win === "max") { w.classList.toggle("maximized"); w.classList.remove("minimized"); }
+  document.body.classList.toggle("has-max", !!document.querySelector(".window.maximized"));
+});
+document.addEventListener("dblclick", (e) => {
+  const bar = e.target.closest(".title-bar");
+  if (bar && !e.target.closest("button")) bar.querySelector('[data-win="max"]')?.click();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.querySelector(".window.maximized [data-win=max]")?.click();
+});
+
+// Stop the browser from opening a file that's dropped outside a drop zone.
+["dragover", "drop"].forEach((t) => window.addEventListener(t, (e) => {
+  if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+}));
+
+// Notifications appear as balloons above the system tray.
 function toast(msg, kind = "info") {
+  document.querySelectorAll(".balloon").forEach((b) => b.remove());
+  const icon = { error: "⛔", success: "✅", info: "ℹ️" }[kind] || "ℹ️";
+  const title = { error: "Error", success: "Done", info: EVENT_NAME }[kind] || EVENT_NAME;
   const el = document.createElement("div");
-  el.className = `toast toast-${kind}`;
-  el.textContent = msg;
+  el.className = `balloon balloon-${kind}`;
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  el.innerHTML = `<button class="balloon-x" aria-label="Close">×</button>
+    <div class="balloon-title"><span aria-hidden="true">${icon}</span> ${esc(title)}</div>
+    <div class="balloon-msg">${esc(msg)}</div>`;
+  el.onclick = () => el.remove();
   document.body.appendChild(el);
   setTimeout(() => el.classList.add("show"), 10);
-  setTimeout(() => { el.classList.remove("show"); setTimeout(() => el.remove(), 300); }, 4500);
+  setTimeout(() => { el.classList.remove("show"); setTimeout(() => el.remove(), 300); }, 6000);
 }
 
 function confirmModal({ title, body, confirmText = "Yes", cancelText = "Cancel" }) {
   return new Promise((resolve) => {
     modalRoot.innerHTML = `
       <div class="modal-backdrop">
-        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
-          <h3 id="m-title">${esc(title)}</h3>
-          <div class="modal-body">${body}</div>
-          <div class="modal-actions">
-            <button class="btn btn-ghost" data-a="no">${esc(cancelText)}</button>
-            <button class="btn btn-primary" data-a="yes">${esc(confirmText)}</button>
+        <div class="window modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
+          <div class="title-bar">
+            <div class="title-bar-text" id="m-title"><span class="ti" aria-hidden="true">⚠️</span><span>${esc(title)}</span></div>
+            <div class="title-bar-controls"><button type="button" class="tb-close" data-a="no" aria-label="Close" title="Close"></button></div>
+          </div>
+          <div class="window-body">
+            <div class="dialog-row">
+              <div class="dialog-icon" aria-hidden="true">❓</div>
+              <div class="modal-body">${body}</div>
+            </div>
+            <div class="modal-actions">
+              <button class="btn btn-primary" data-a="yes">${esc(confirmText)}</button>
+              <button class="btn" data-a="no">${esc(cancelText)}</button>
+            </div>
           </div>
         </div>
       </div>`;
-    const close = (v) => { modalRoot.innerHTML = ""; resolve(v); };
-    modalRoot.querySelector('[data-a="yes"]').onclick = () => close(true);
-    modalRoot.querySelector('[data-a="no"]').onclick = () => close(false);
-    modalRoot.querySelector(".modal-backdrop").onclick = (e) => { if (e.target.classList.contains("modal-backdrop")) close(false); };
-    modalRoot.querySelector('[data-a="no"]').focus();
+    const close = (v) => { modalRoot.innerHTML = ""; document.removeEventListener("keydown", onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") close(false); };
+    document.addEventListener("keydown", onKey);
+    modalRoot.querySelectorAll('[data-a="yes"]').forEach((b) => (b.onclick = () => close(true)));
+    modalRoot.querySelectorAll('[data-a="no"]').forEach((b) => (b.onclick = () => close(false)));
+    modalRoot.querySelector('.modal-actions [data-a="no"]').focus();
   });
 }
 
 function setIframe(iframe, html) {
-  iframe.srcdoc = html || "<!DOCTYPE html><html><body style='font-family:system-ui;color:#888;display:grid;place-items:center;height:100vh;margin:0'>Nothing yet</body></html>";
+  iframe.srcdoc = html || "<!DOCTYPE html><html><body style='font-family:Tahoma,Verdana,sans-serif;font-size:12px;color:#666;background:#fff;display:grid;place-items:center;height:100vh;margin:0'>Nothing here yet. Run a practice test to see a preview.</body></html>";
 }
 
 // ---------------------------------------------------------------------------
@@ -170,61 +225,113 @@ async function generate(kind, prompt, files, onProgress) {
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
+// The header is a taskbar: start menu, one button per page, and a clock.
 function renderTopbar() {
   const route = location.hash || "#/";
-  const link = (href, label) => `<a href="${href}" class="${route === href || (href !== "#/" && route.startsWith(href)) ? "active" : ""}">${label}</a>`;
+  const isActive = (href) => route === href || (href !== "#/" && route.startsWith(href));
+  const items = [
+    { href: "#/", icon: state.profile ? "🖥️" : "🔑", label: state.profile ? "My workspace" : "Sign in" },
+    { href: "#/dashboard", icon: "🗂️", label: "Dashboard" },
+    ...(state.profile ? [{ href: `#/u/${esc(state.profile.username)}`, icon: "👤", label: `@${esc(state.profile.username)}` }] : []),
+  ];
   topbar.innerHTML = `
-    <div class="topbar-inner">
-      <div class="brand">
-        <a class="back" href="${esc(EVENTS_HOME_URL)}" title="All events">←</a>
-        <a href="#/" class="brand-name">${esc(EVENT_NAME)}</a>
-      </div>
-      <nav>
-        ${state.profile ? link("#/", "My workspace") : ""}
-        ${link("#/dashboard", "Dashboard")}
-        ${state.profile ? link(`#/u/${state.profile.username}`, `@${esc(state.profile.username)}`) : ""}
-        ${state.session ? `<button class="btn btn-ghost btn-sm" id="signout">Sign out</button>` : ""}
+    <div class="taskbar">
+      <button class="start-btn" id="start-btn" aria-haspopup="menu" aria-expanded="false">
+        <span class="start-logo" aria-hidden="true"></span>start
+      </button>
+      <nav class="task-buttons" aria-label="Pages">
+        ${items.map((i) => `<a class="task-btn ${isActive(i.href) ? "active" : ""}" href="${i.href}"><span aria-hidden="true">${i.icon}</span><span class="task-label">${i.label}</span></a>`).join("")}
       </nav>
+      <div class="tray">
+        <span class="tray-icon" title="Connected" aria-hidden="true">📶</span>
+        <span class="tray-icon" title="Volume" aria-hidden="true">🔊</span>
+        <time id="clock"></time>
+      </div>
+    </div>
+    <div class="start-menu" id="start-menu" role="menu" hidden>
+      <div class="sm-head">
+        <span class="sm-avatar" aria-hidden="true">${state.profile ? "🧑‍💻" : "🌐"}</span>
+        <strong>${state.profile ? `@${esc(state.profile.username)}` : "Guest"}</strong>
+      </div>
+      <div class="sm-body">
+        <div class="sm-col">
+          ${items.map((i) => `<a role="menuitem" href="${i.href}"><span aria-hidden="true">${i.icon}</span>${i.label}</a>`).join("")}
+          ${state.profile ? `<a role="menuitem" href="#/site/${esc(state.profile.username)}"><span aria-hidden="true">🖼️</span>My product, full screen</a>` : ""}
+        </div>
+        <div class="sm-col sm-col-right">
+          <a role="menuitem" href="${esc(EVENTS_HOME_URL)}"><span aria-hidden="true">📅</span>All events</a>
+          <div class="sm-note">${esc(EVENT_NAME)}<br>${esc(EVENT_TAGLINE)}</div>
+        </div>
+      </div>
+      <div class="sm-foot">
+        ${state.session ? `<button class="sm-power" id="signout"><span aria-hidden="true">⏻</span> Log Off</button>` : `<a class="sm-power" href="#/"><span aria-hidden="true">🔑</span> Log On</a>`}
+      </div>
     </div>`;
+  const btn = $("#start-btn"), menu = $("#start-menu");
+  const setOpen = (open) => { menu.hidden = !open; btn.classList.toggle("open", open); btn.setAttribute("aria-expanded", String(open)); };
+  btn.onclick = (e) => { e.stopPropagation(); setOpen(menu.hidden); };
+  menu.onclick = (e) => { if (e.target.closest("a")) setOpen(false); };
+  document.onclick = (e) => { if (!menu.hidden && !menu.contains(e.target)) setOpen(false); };
   const so = $("#signout");
-  if (so) so.onclick = async () => { await sb.auth.signOut(); location.hash = "#/"; };
+  if (so) so.onclick = async () => { setOpen(false); await sb.auth.signOut(); location.hash = "#/"; };
+  tickClock();
 }
+
+function tickClock() {
+  const c = $("#clock");
+  if (c) c.textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+setInterval(tickClock, 15000);
 
 // ---------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------
 function viewNotConfigured() {
-  app.innerHTML = `
-    <section class="card narrow">
-      <h1>Almost there</h1>
-      <p>Open <code>config.js</code> and paste your Supabase project URL and anon key. See the README for the full setup.</p>
-    </section>`;
+  app.innerHTML = win("Setup required", `
+    <div class="dialog-row">
+      <div class="dialog-icon" aria-hidden="true">⚙️</div>
+      <div><p><strong>Almost there.</strong></p>
+      <p>Open <code>config.js</code> and paste your Supabase project URL and anon key. See the README for the full setup.</p></div>
+    </div>`, { icon: "⚙️", cls: "narrow", controls: false });
+}
+
+function logonBanner() {
+  return `
+    <div class="logon-banner">
+      <div class="logon-badge" aria-hidden="true">AI</div>
+      <div>
+        <div class="logon-name">${esc(EVENT_NAME)}</div>
+        <div class="logon-tag">${esc(EVENT_TAGLINE)}</div>
+      </div>
+    </div>`;
 }
 
 function viewLogin() {
   const pending = sessionStorage.getItem("pendingEmail");
   app.innerHTML = `
-    <section class="hero">
-      <h1>${esc(EVENT_NAME)}</h1>
-      <p class="tagline">${esc(EVENT_TAGLINE)}</p>
-    </section>
-    <section class="card narrow">
+    ${win("Log On to " + esc(EVENT_NAME), `
+      ${logonBanner()}
+      <div class="logon-body">
       ${pending ? `
-        <h2>Check your email</h2>
-        <p class="muted">We sent a sign-in code to <strong>${esc(pending)}</strong>.</p>
-        <form id="code-form" class="stack">
-          <label>Code<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="123456" required /></label>
-          <button class="btn btn-primary" type="submit">Sign in</button>
-          <button class="btn btn-ghost" type="button" id="restart">Use a different email</button>
+        <p>We sent a sign-in code to <strong>${esc(pending)}</strong>. Check your inbox (and spam).</p>
+        <form id="code-form" class="form-grid">
+          <label for="code">Code:</label>
+          <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="123456" required />
+          <div class="form-actions">
+            <button class="btn btn-primary" type="submit">OK</button>
+            <button class="btn" type="button" id="restart">Use a different email</button>
+          </div>
         </form>` : `
-        <h2>Sign in with your USF email</h2>
-        <p class="muted">Use an address ending in ${ALLOWED_DOMAINS.map((d) => `<code>@${esc(d)}</code>`).join(", ")}.</p>
-        <form id="email-form" class="stack">
-          <label>Email<input id="email" type="email" autocomplete="email" placeholder="you@dons.usfca.edu" required /></label>
-          <button class="btn btn-primary" type="submit">Send me a code</button>
+        <p>Sign in with your USF email: ${ALLOWED_DOMAINS.map((d) => `<code>@${esc(d)}</code>`).join(", ")}.</p>
+        <form id="email-form" class="form-grid">
+          <label for="email">E-mail:</label>
+          <input id="email" type="email" autocomplete="email" placeholder="you@dons.usfca.edu" required />
+          <div class="form-actions">
+            <button class="btn btn-primary" type="submit">Send me a code</button>
+          </div>
         </form>`}
-    </section>
-    <p class="center"><a href="#/dashboard">Browse what people have built →</a></p>`;
+      </div>`, { icon: "🔑", cls: "narrow logon", controls: false })}
+    <p class="center desktop-link"><a href="#/dashboard">🗂️ Browse what people have built →</a></p>`;
 
   const ef = $("#email-form");
   if (ef) ef.onsubmit = async (e) => {
@@ -254,15 +361,17 @@ function viewLogin() {
 
 function viewChooseUsername() {
   const suggestion = (state.session.user.email.split("@")[0] || "").toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 24);
-  app.innerHTML = `
-    <section class="card narrow">
-      <h2>Pick your username</h2>
-      <p class="muted">This is how everyone will find your product on the dashboard. 3–24 characters: lowercase letters, numbers, <code>-</code> or <code>_</code>.</p>
-      <form id="u-form" class="stack">
-        <label>Username<input id="username" value="${esc(suggestion)}" pattern="[a-z0-9_\\-]{3,24}" required /></label>
-        <button class="btn btn-primary" type="submit">Continue</button>
+  app.innerHTML = win("New User Setup", `
+    ${logonBanner()}
+    <div class="logon-body">
+      <p>Pick your username. This is how everyone will find your product on the dashboard.</p>
+      <p class="muted small">3–24 characters: lowercase letters, numbers, <code>-</code> or <code>_</code>.</p>
+      <form id="u-form" class="form-grid">
+        <label for="username">User name:</label>
+        <input id="username" value="${esc(suggestion)}" pattern="[a-z0-9_\\-]{3,24}" required />
+        <div class="form-actions"><button class="btn btn-primary" type="submit">Next &gt;</button></div>
       </form>
-    </section>`;
+    </div>`, { icon: "👤", cls: "narrow logon", controls: false });
   $("#username").oninput = (e) => { e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""); };
   $("#u-form").onsubmit = async (e) => {
     e.preventDefault();
@@ -275,37 +384,71 @@ function viewChooseUsername() {
   };
 }
 
+// Reference files: drag them onto the drop zone (or anywhere on the form),
+// or click Browse… to pick them.
 function fileInputBlock(id) {
   return `
-    <div class="files">
-      <label class="btn btn-ghost btn-sm file-btn">📎 Attach references
-        <input type="file" id="${id}" multiple accept="${ACCEPT}" hidden />
-      </label>
-      <span class="muted small">Images, PDF, txt, md, csv, json · up to ${MAX_FILES} files, ${MAX_FILE_MB} MB each</span>
+    <div class="dropzone" id="${id}-zone">
+      <input type="file" id="${id}" multiple accept="${ACCEPT}" hidden />
+      <div class="dz-empty">
+        <span class="dz-icon" aria-hidden="true">📂</span>
+        <span><strong>Drag reference files here</strong> or
+          <label class="btn btn-sm" for="${id}">Browse…</label></span>
+        <span class="muted small">Images, PDF, txt, md, csv, json · up to ${MAX_FILES} files, ${MAX_FILE_MB} MB each</span>
+      </div>
       <ul class="file-list" id="${id}-list"></ul>
+      <div class="dz-overlay" aria-hidden="true">📥 Drop to attach</div>
     </div>`;
 }
 
+const fileIcon = (name) => /\.(png|jpe?g|gif|webp)$/i.test(name) ? "🖼️" : /\.pdf$/i.test(name) ? "📕" : "📄";
+const fileSize = (n) => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+
 function wireFileInput(id) {
   let files = [];
-  const input = $(`#${id}`), list = $(`#${id}-list`);
+  const input = $(`#${id}`), list = $(`#${id}-list`), zone = $(`#${id}-zone`);
+  const target = zone.closest("form") || zone;
   const draw = () => {
-    list.innerHTML = files.map((f, i) => `<li>${esc(f.name)} <button type="button" data-i="${i}" title="Remove">✕</button></li>`).join("");
+    zone.classList.toggle("has-files", files.length > 0);
+    list.innerHTML = files.map((f, i) => `
+      <li><span aria-hidden="true">${fileIcon(f.name)}</span><span class="fl-name">${esc(f.name)}</span>
+        <span class="muted small">${fileSize(f.size)}</span>
+        <button type="button" data-i="${i}" title="Remove" aria-label="Remove ${esc(f.name)}">×</button></li>`).join("") +
+      (files.length && files.length < MAX_FILES ? `<li class="fl-add"><label for="${id}">+ Add more…</label></li>` : "");
     list.querySelectorAll("button").forEach((b) => (b.onclick = () => { files.splice(+b.dataset.i, 1); draw(); }));
   };
-  input.onchange = () => {
-    for (const f of input.files) {
+  const add = (incoming) => {
+    let added = 0;
+    for (const f of incoming) {
       const ext = (f.name.split(".").pop() || "").toLowerCase();
       if (!MIME_BY_EXT[ext]) { toast(`${f.name}: unsupported file type`, "error"); continue; }
       if (f.size > MAX_FILE_MB * 1024 * 1024) { toast(`${f.name} is over ${MAX_FILE_MB} MB`, "error"); continue; }
+      if (files.some((x) => x.name === f.name && x.size === f.size)) continue;
       if (files.length >= MAX_FILES) { toast(`Max ${MAX_FILES} files`, "error"); break; }
-      files.push(f);
+      files.push(f); added++;
     }
-    input.value = "";
     draw();
+    return added;
   };
+  input.onchange = () => { add(input.files); input.value = ""; };
+
+  // Drag & drop onto the whole form. The counter avoids flicker when the
+  // pointer passes over child elements.
+  let depth = 0;
+  const hasFiles = (e) => e.dataTransfer?.types?.includes("Files");
+  target.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; zone.classList.add("dragging"); });
+  target.addEventListener("dragover", (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+  target.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) zone.classList.remove("dragging"); });
+  target.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); depth = 0; zone.classList.remove("dragging");
+    const n = add(e.dataTransfer.files);
+    if (n) toast(`Attached ${n} file${n > 1 ? "s" : ""}.`, "success");
+  });
   return { get: () => files, clear: () => { files = []; draw(); } };
 }
+
+const progressBar = () => `<div class="progress" role="progressbar" aria-label="Generating"><div class="progress-marquee"></div></div>`;
 
 async function viewWorkspace() {
   const uid = state.session.user.id;
@@ -317,74 +460,73 @@ async function viewWorkspace() {
   const limit = state.settings.test_limit;
   const used = tests?.length ?? 0;
   const left = limit > 0 ? Math.max(0, limit - used) : Infinity;
+  const statusLabel = { done: "Done", error: "Failed", generating: "Running" };
 
   app.innerHTML = `
-    <section class="intro">
-      <h1>Hi @${esc(state.profile.username)}</h1>
-      <p class="muted">Practice as much as you like, then submit <strong>one</strong> final input. Your final product gets its own page on the dashboard.</p>
-    </section>
+    ${win(`Welcome, @${esc(state.profile.username)}`, `
+      <div class="dialog-row">
+        <div class="dialog-icon" aria-hidden="true">💡</div>
+        <p>Practice as much as you like, then submit <strong>one</strong> final input. Your final product gets its own page on the dashboard.</p>
+      </div>`, { icon: "🖥️", cls: "intro-win" })}
 
     <div class="grid-2">
-      <section class="card">
-        <div class="card-head">
-          <h2>1 · Practice</h2>
-          <span class="pill">${limit > 0 ? `${left} of ${limit} runs left` : "Unlimited runs"}</span>
-        </div>
-        <p class="muted small">Private — only you can see practice runs.</p>
+      ${win("1 · Practice", `
+        <p class="muted small">🔒 Private: only you can see practice runs.</p>
         <form id="test-form" class="stack">
           <textarea id="test-prompt" rows="6" maxlength="8000" placeholder="Describe the product you want built…" required></textarea>
           ${fileInputBlock("test-files")}
-          <button class="btn btn-secondary" type="submit" ${left === 0 ? "disabled" : ""}>Run practice test</button>
+          <div class="form-actions"><button class="btn btn-primary" type="submit" ${left === 0 ? "disabled" : ""}>▶ Run practice test</button></div>
         </form>
         ${tests?.length ? `
-          <h3 class="mt">Your practice runs</h3>
-          <ul class="history" id="history">
-            ${tests.map((t) => `
-              <li data-id="${t.id}">
-                <span class="status status-${t.status}"></span>
-                <span class="h-prompt">${esc(t.prompt.slice(0, 90))}${t.prompt.length > 90 ? "…" : ""}</span>
-                <span class="muted small">${timeAgo(t.created_at)}</span>
-              </li>`).join("")}
-          </ul>` : ""}
-      </section>
+          <fieldset class="mt">
+            <legend>Your practice runs</legend>
+            <div class="listview-wrap"><table class="listview" id="history">
+              <thead><tr><th>Input</th><th>Status</th><th>When</th></tr></thead>
+              <tbody>
+              ${tests.map((t) => `
+                <tr data-id="${t.id}" tabindex="0">
+                  <td class="h-prompt">${esc(t.prompt.slice(0, 90))}${t.prompt.length > 90 ? "…" : ""}</td>
+                  <td><span class="status status-${t.status}"></span>${statusLabel[t.status] || esc(t.status)}</td>
+                  <td class="nowrap">${timeAgo(t.created_at)}</td>
+                </tr>`).join("")}
+              </tbody>
+            </table></div>
+          </fieldset>` : ""}`,
+        { icon: "📝", status: `<span class="status-bar-field">${limit > 0 ? `${left} of ${limit} runs left` : "Unlimited runs"}</span><span class="status-bar-field">${used} used</span>` })}
 
-      <section class="card card-final">
-        <div class="card-head">
-          <h2>2 · Final submission</h2>
-          ${final ? `<span class="pill pill-done">Submitted</span>` : state.settings.final_open ? `<span class="pill pill-open">Open</span>` : `<span class="pill">Closed</span>`}
-        </div>
-        ${final ? `
-          <p>You submitted your final ${timeAgo(final.created_at)}.</p>
-          ${final.status === "generating" ? `<p class="muted">It's still being generated… this page will be ready shortly.</p>` : ""}
-          <a class="btn btn-primary" href="#/u/${esc(state.profile.username)}">View your product page →</a>
+      ${win("2 · Final submission", final ? `
+          <div class="dialog-row">
+            <div class="dialog-icon" aria-hidden="true">🏆</div>
+            <div>
+              <p>You submitted your final ${timeAgo(final.created_at)}.</p>
+              ${final.status === "generating" ? `<p class="muted">It's still being generated… your page will be ready shortly.</p>${progressBar()}` : ""}
+            </div>
+          </div>
+          <div class="form-actions"><a class="btn btn-primary" href="#/u/${esc(state.profile.username)}">View your product page →</a></div>
         ` : !state.settings.final_open ? `
-          <p class="muted">Final submissions are closed.</p>
+          <div class="dialog-row"><div class="dialog-icon" aria-hidden="true">🚫</div><p>Final submissions are closed.</p></div>
         ` : `
           <p class="muted small">You get <strong>one</strong> final. It will be public on the dashboard.</p>
           <form id="final-form" class="stack">
             <textarea id="final-prompt" rows="8" maxlength="8000" placeholder="Your one final input…" required></textarea>
             ${fileInputBlock("final-files")}
-            <div class="row">
-              <button class="btn btn-ghost btn-sm" type="button" id="copy-practice">Copy from practice box</button>
+            <div class="form-actions">
+              <button class="btn" type="button" id="copy-practice">📋 Copy from practice box</button>
               <button class="btn btn-primary" type="submit">Submit final</button>
             </div>
-          </form>`}
-      </section>
+          </form>`,
+        { icon: "🏁", cls: "card-final", status: `<span class="status-bar-field">${final ? "✔ Submitted" : state.settings.final_open ? "● Open" : "Closed"}</span>` })}
     </div>
 
-    <section class="card preview-card">
-      <div class="card-head">
-        <h2 id="preview-title">Preview</h2>
-        <div class="row">
-          <span class="muted small" id="preview-status"></span>
-          <button class="btn btn-ghost btn-sm" id="toggle-code">Show code</button>
-        </div>
+    ${win(`<span id="preview-title">Preview</span>`, `
+      <div class="toolbar">
+        <button class="btn btn-sm" id="toggle-code">📄 Show code</button>
       </div>
       <iframe id="preview" class="preview" sandbox="${SANDBOX}" title="Generated product preview"></iframe>
-      <pre id="code" class="code" hidden></pre>
-    </section>`;
+      <pre id="code" class="code" hidden></pre>`,
+      { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow" id="preview-status">Ready</span><span class="status-bar-field" id="preview-progress"></span>` })}`;
 
-  const preview = $("#preview"), codeEl = $("#code"), statusEl = $("#preview-status");
+  const preview = $("#preview"), codeEl = $("#code"), statusEl = $("#preview-status"), progEl = $("#preview-progress");
   let currentHtml = "";
   const show = (html, label) => {
     currentHtml = html || "";
@@ -397,30 +539,36 @@ async function viewWorkspace() {
   $("#toggle-code").onclick = (e) => {
     codeEl.hidden = !codeEl.hidden;
     preview.hidden = !codeEl.hidden;
-    e.target.textContent = codeEl.hidden ? "Show code" : "Show preview";
+    e.currentTarget.textContent = codeEl.hidden ? "📄 Show code" : "🌐 Show preview";
   };
 
-  $("#history")?.querySelectorAll("li").forEach((li) => {
-    li.onclick = () => {
-      const t = tests.find((x) => x.id === li.dataset.id);
+  $("#history")?.querySelectorAll("tbody tr").forEach((tr) => {
+    const open = () => {
+      const t = tests.find((x) => x.id === tr.dataset.id);
+      $("#history").querySelectorAll("tr.selected").forEach((r) => r.classList.remove("selected"));
+      tr.classList.add("selected");
       $("#test-prompt").value = t.prompt;
       show(t.output_html, "Practice run · " + timeAgo(t.created_at));
-      statusEl.textContent = t.status === "error" ? `⚠ ${t.error || "failed"}` : "";
+      statusEl.textContent = t.status === "error" ? `⚠ ${t.error || "failed"}` : "Done";
       preview.scrollIntoView({ behavior: "smooth", block: "start" });
     };
+    tr.onclick = open;
+    tr.onkeydown = (e) => { if (e.key === "Enter") open(); };
   });
 
   // Live progress while generating
   const runWithProgress = async (kind, prompt, files, button) => {
     if (state.busy) return;
     state.busy = true;
-    const original = button.textContent;
+    const original = button.innerHTML;
     button.disabled = true; button.textContent = "Generating…";
     preview.scrollIntoView({ behavior: "smooth", block: "start" });
     $("#preview-title").textContent = kind === "final" ? "Generating your final product…" : "Generating practice run…";
+    document.body.classList.add("busy");
+    progEl.innerHTML = progressBar();
     const started = Date.now();
     let lastPaint = 0, chars = 0;
-    const tick = setInterval(() => { statusEl.textContent = `${Math.round((Date.now() - started) / 1000)}s · ${chars.toLocaleString()} characters`; }, 500);
+    const tick = setInterval(() => { statusEl.textContent = `Building… ${Math.round((Date.now() - started) / 1000)}s · ${chars.toLocaleString()} characters`; }, 500);
     codeEl.textContent = "";
     try {
       const run = await generate(kind, prompt, files, (text) => {
@@ -432,13 +580,15 @@ async function viewWorkspace() {
       statusEl.textContent = run.error ? `⚠ ${run.error}` : `Done in ${Math.round((Date.now() - started) / 1000)}s`;
       return run;
     } catch (e) {
-      statusEl.textContent = "";
+      statusEl.textContent = "Ready";
       toast(e.message, "error");
       return null;
     } finally {
       clearInterval(tick);
+      progEl.innerHTML = "";
+      document.body.classList.remove("busy");
       state.busy = false;
-      button.disabled = false; button.textContent = original;
+      button.disabled = false; button.innerHTML = original;
     }
   };
 
@@ -475,7 +625,7 @@ async function viewWorkspace() {
 }
 
 async function viewDashboard() {
-  app.innerHTML = `<p class="muted">Loading dashboard…</p>`;
+  app.innerHTML = win("Dashboard", `<p>Loading dashboard…</p>${progressBar()}`, { icon: "🗂️", cls: "narrow", controls: false });
   const [{ data: profiles }, { data: finals }] = await Promise.all([
     sb.from("profiles").select("id, username, created_at").order("username"),
     sb.from("runs").select("id, user_id, prompt, status, created_at, output_html").eq("kind", "final").neq("status", "error"),
@@ -485,25 +635,27 @@ async function viewDashboard() {
     .sort((a, b) => (!!b.final - !!a.final) || (a.final && b.final ? new Date(a.final.created_at) - new Date(b.final.created_at) : a.username.localeCompare(b.username)));
   const submitted = rows.filter((r) => r.final).length;
 
-  app.innerHTML = `
-    <section class="intro">
-      <h1>Dashboard</h1>
-      <p class="muted">${submitted} product${submitted === 1 ? "" : "s"} submitted · ${rows.length} participant${rows.length === 1 ? "" : "s"}</p>
-      <input id="search" class="search" placeholder="Search by username or input…" />
-    </section>
+  app.innerHTML = win("Dashboard · All products", `
+    <div class="toolbar">
+      <label class="search-label" for="search">🔍 Search:</label>
+      <input id="search" class="search" placeholder="Username or input…" />
+    </div>
     <div class="gallery" id="gallery">
       ${rows.map((r) => `
         <a class="tile ${r.final ? "" : "tile-empty"}" href="#/u/${esc(r.username)}" data-q="${esc((r.username + " " + (r.final?.prompt || "")).toLowerCase())}">
+          <div class="tile-title"><span aria-hidden="true">${r.final ? "🌐" : "📁"}</span> @${esc(r.username)}</div>
           <div class="thumb">
             ${r.final?.output_html ? `<iframe sandbox="" loading="lazy" tabindex="-1" title="${esc(r.username)} preview" data-html="1"></iframe>`
-              : `<div class="thumb-empty">${r.final ? "Generating…" : "Not submitted yet"}</div>`}
+              : `<div class="thumb-empty">${r.final ? "⏳ Generating…" : "Not submitted yet"}</div>`}
           </div>
           <div class="tile-body">
-            <strong>@${esc(r.username)}</strong>
-            <p class="muted small">${r.final ? esc(r.final.prompt.slice(0, 110)) + (r.final.prompt.length > 110 ? "…" : "") : "—"}</p>
+            <p class="small">${r.final ? esc(r.final.prompt.slice(0, 110)) + (r.final.prompt.length > 110 ? "…" : "") : "—"}</p>
           </div>
         </a>`).join("") || `<p class="muted">No participants yet.</p>`}
-    </div>`;
+    </div>`, {
+      icon: "🗂️", cls: "dash-win",
+      status: `<span class="status-bar-field">${submitted} product${submitted === 1 ? "" : "s"} submitted</span><span class="status-bar-field">${rows.length} participant${rows.length === 1 ? "" : "s"}</span><span class="status-bar-field grow" id="search-count"></span>`,
+    });
 
   // Fill thumbnails (static render: scripts disabled to keep the page light)
   const tiles = [...document.querySelectorAll(".tile")];
@@ -515,13 +667,21 @@ async function viewDashboard() {
 
   $("#search").oninput = (e) => {
     const q = e.target.value.toLowerCase().trim();
-    tiles.forEach((t) => (t.style.display = !q || t.dataset.q.includes(q) ? "" : "none"));
+    let shown = 0;
+    tiles.forEach((t) => { const ok = !q || t.dataset.q.includes(q); t.style.display = ok ? "" : "none"; shown += ok; });
+    $("#search-count").textContent = q ? `${shown} match${shown === 1 ? "" : "es"}` : "";
   };
 }
 
 async function viewUser(username, fullscreen = false) {
   const { data: profile } = await sb.from("profiles").select("id, username, created_at").eq("username", username).maybeSingle();
-  if (!profile) { app.innerHTML = `<section class="card narrow"><h2>No user @${esc(username)}</h2><a href="#/dashboard">← Dashboard</a></section>`; return; }
+  if (!profile) {
+    app.innerHTML = win("User not found", `
+      <div class="dialog-row"><div class="dialog-icon" aria-hidden="true">⛔</div>
+        <p>There's no user called <strong>@${esc(username)}</strong>.</p></div>
+      <div class="form-actions"><a class="btn" href="#/dashboard">OK</a></div>`, { icon: "⛔", cls: "narrow", controls: false });
+    return;
+  }
   const { data: finals } = await sb.from("runs").select("*").eq("user_id", profile.id).eq("kind", "final").order("created_at", { ascending: false });
   const final = finals?.find((f) => f.status !== "error") || null;
   const isMe = state.profile?.id === profile.id;
@@ -529,62 +689,58 @@ async function viewUser(username, fullscreen = false) {
   if (fullscreen && final?.output_html) {
     document.body.classList.add("fullscreen");
     app.innerHTML = `
-      <div class="fs-bar"><a href="#/u/${esc(username)}">← @${esc(username)}</a><span class="muted small">${esc(EVENT_NAME)}</span></div>
-      <iframe class="fs-frame" sandbox="${SANDBOX}" title="@${esc(username)}'s product"></iframe>`;
+      <div class="window fs-window">
+        <div class="title-bar">
+          <div class="title-bar-text"><span class="ti" aria-hidden="true">🌐</span><span>@${esc(username)}'s product · ${esc(EVENT_NAME)}</span></div>
+          <div class="title-bar-controls"><a class="tb-close" href="#/u/${esc(username)}" aria-label="Close" title="Close"></a></div>
+        </div>
+        <div class="fs-menu"><a href="#/u/${esc(username)}">← Back to @${esc(username)}</a></div>
+        <iframe class="fs-frame" sandbox="${SANDBOX}" title="@${esc(username)}'s product"></iframe>
+      </div>`;
     setIframe($(".fs-frame"), final.output_html);
     return;
   }
 
   if (!final) {
-    app.innerHTML = `
-      <section class="card narrow">
-        <h1>@${esc(username)}</h1>
-        <p class="muted">${isMe ? "You haven't submitted your final yet." : "Hasn't submitted a final yet."}</p>
-        ${isMe ? `<a class="btn btn-primary" href="#/">Go to my workspace</a>` : `<a href="#/dashboard">← Dashboard</a>`}
-      </section>`;
+    app.innerHTML = win(`@${esc(username)}`, `
+      <div class="dialog-row"><div class="dialog-icon" aria-hidden="true">📭</div>
+        <p>${isMe ? "You haven't submitted your final yet." : "Hasn't submitted a final yet."}</p></div>
+      <div class="form-actions">${isMe ? `<a class="btn btn-primary" href="#/">Go to my workspace</a>` : `<a class="btn" href="#/dashboard">← Dashboard</a>`}</div>`,
+      { icon: "👤", cls: "narrow", controls: false });
     return;
   }
 
   const atts = final.attachments || [];
   app.innerHTML = `
-    <section class="intro">
-      <a href="#/dashboard" class="small">← Dashboard</a>
-      <h1>@${esc(username)}</h1>
-      <p class="muted small">Submitted ${new Date(final.created_at).toLocaleString()}${final.model ? ` · ${esc(final.model)}` : ""}</p>
-    </section>
-
-    <section class="card">
-      <h2>Input</h2>
+    ${win(`@${esc(username)} · Input`, `
+      <div class="toolbar"><a class="btn btn-sm" href="#/dashboard">← Dashboard</a></div>
       <div class="prompt-box">${esc(final.prompt)}</div>
       ${atts.length ? `
-        <h3 class="mt">References</h3>
-        <div class="refs">
-          ${atts.map((a) => a.mime?.startsWith("image/")
-            ? `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-img"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy" /></a>`
-            : `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-file">📄 ${esc(a.name)}</a>`).join("")}
-        </div>` : ""}
-    </section>
+        <fieldset class="mt">
+          <legend>References</legend>
+          <div class="refs">
+            ${atts.map((a) => a.mime?.startsWith("image/")
+              ? `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-img" title="${esc(a.name)}"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy" /><span>${esc(a.name)}</span></a>`
+              : `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-file"><span class="ref-file-icon" aria-hidden="true">${fileIcon(a.name)}</span><span>${esc(a.name)}</span></a>`).join("")}
+          </div>
+        </fieldset>` : ""}`,
+      { icon: "📝", status: `<span class="status-bar-field">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}
 
-    <section class="card preview-card">
-      <div class="card-head">
-        <h2>Output</h2>
-        <div class="row">
-          ${final.status === "generating" ? `<span class="pill">Generating…</span>` : ""}
-          ${final.error ? `<span class="muted small">⚠ ${esc(final.error)}</span>` : ""}
-          <button class="btn btn-ghost btn-sm" id="toggle-code">Show code</button>
-          <button class="btn btn-ghost btn-sm" id="download">Download HTML</button>
-          <a class="btn btn-primary btn-sm" href="#/site/${esc(username)}">Open full screen ↗</a>
-        </div>
+    ${win(`@${esc(username)} · Output`, `
+      <div class="toolbar">
+        <button class="btn btn-sm" id="toggle-code">📄 Show code</button>
+        <button class="btn btn-sm" id="download">💾 Download HTML</button>
+        <a class="btn btn-sm btn-primary" href="#/site/${esc(username)}">Open full screen ↗</a>
       </div>
       <iframe id="out" class="preview preview-tall" sandbox="${SANDBOX}" title="@${esc(username)}'s product"></iframe>
-      <pre id="code" class="code" hidden></pre>
-    </section>`;
+      <pre id="code" class="code" hidden></pre>`,
+      { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow">${final.status === "generating" ? "⏳ Generating…" : final.error ? `⚠ ${esc(final.error)}` : "Done"}</span>${final.status === "generating" ? `<span class="status-bar-field">${progressBar()}</span>` : ""}` })}`;
 
   setIframe($("#out"), final.output_html);
   $("#code").textContent = final.output_html || "";
   $("#toggle-code").onclick = (e) => {
     const c = $("#code"); c.hidden = !c.hidden; $("#out").hidden = !c.hidden;
-    e.target.textContent = c.hidden ? "Show code" : "Show preview";
+    e.currentTarget.textContent = c.hidden ? "📄 Show code" : "🌐 Show preview";
   };
   $("#download").onclick = () => {
     const a = document.createElement("a");
@@ -612,7 +768,7 @@ async function render() {
     return await viewWorkspace();
   } catch (e) {
     console.error(e);
-    app.innerHTML = `<section class="card narrow"><h2>Something went wrong</h2><p class="muted">${esc(e.message)}</p></section>`;
+    app.innerHTML = win("Error", `<div class="dialog-row"><div class="dialog-icon" aria-hidden="true">⛔</div><div><p><strong>Something went wrong.</strong></p><p class="muted">${esc(e.message)}</p></div></div><div class="form-actions"><button class="btn" onclick="location.reload()">OK</button></div>`, { icon: "⛔", cls: "narrow", controls: false });
   }
 }
 
