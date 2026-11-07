@@ -225,6 +225,24 @@ async function generate(kind, prompt, files, onProgress) {
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
+// Sign out, after a confirmation dialog.
+async function logOff() {
+  const ok = await confirmModal({
+    title: `Log Off ${EVENT_NAME}`,
+    body: `<p>Are you sure you want to log off?</p>
+      ${state.busy ? `<p class="muted small">⏳ A generation is still running. It will keep going on the server and be saved to your account.</p>` : ""}
+      <p class="muted small">You can sign back in any time with your USF email.</p>`,
+    confirmText: "Log Off",
+  });
+  if (!ok) return;
+  clearInterval(state.dashTimer);
+  sessionStorage.removeItem("pendingEmail");
+  await sb.auth.signOut();
+  state.session = null; state.profile = null;
+  if (location.hash === "#/" || location.hash === "") render(); else location.hash = "#/";
+  toast("You have been logged off.", "info");
+}
+
 // The header is a taskbar: start menu, one button per page, and a clock.
 function renderTopbar() {
   const route = location.hash || "#/";
@@ -243,6 +261,7 @@ function renderTopbar() {
       <nav class="task-buttons" aria-label="Pages">
         ${items.map((i) => `<a class="task-btn ${isActive(i.href) ? "active" : ""}" href="${i.href}"><span aria-hidden="true">${i.icon}</span><span class="task-label">${i.label}</span></a>`).join("")}
       </nav>
+      ${state.session ? `<button class="task-logoff" id="tb-logoff" title="Log Off"><span aria-hidden="true">⏻</span><span class="task-label">Log Off</span></button>` : ""}
       <div class="tray">
         <span class="tray-icon" title="Connected" aria-hidden="true">📶</span>
         <span class="tray-icon" title="Volume" aria-hidden="true">🔊</span>
@@ -274,7 +293,10 @@ function renderTopbar() {
   menu.onclick = (e) => { if (e.target.closest("a")) setOpen(false); };
   document.onclick = (e) => { if (!menu.hidden && !menu.contains(e.target)) setOpen(false); };
   const so = $("#signout");
-  if (so) so.onclick = async () => { setOpen(false); await sb.auth.signOut(); location.hash = "#/"; };
+  if (so) so.onclick = () => { setOpen(false); logOff(); };
+  const tbl = $("#tb-logoff");
+  if (tbl) tbl.onclick = () => logOff();
+  document.onkeydown = (e) => { if (e.key === "Escape" && !menu.hidden) setOpen(false); };
   tickClock();
 }
 
@@ -320,6 +342,7 @@ function viewLogin() {
           <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="123456" required />
           <div class="form-actions">
             <button class="btn btn-primary" type="submit">OK</button>
+            <button class="btn" type="button" id="resend">Resend code</button>
             <button class="btn" type="button" id="restart">Use a different email</button>
           </div>
         </form>` : `
@@ -343,6 +366,7 @@ function viewLogin() {
     const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
     if (error) { btn.disabled = false; btn.textContent = "Send me a code"; return toast(error.message, "error"); }
     sessionStorage.setItem("pendingEmail", email);
+    sessionStorage.setItem("codeSentAt", String(Date.now()));
     viewLogin();
   };
   const cf = $("#code-form");
@@ -357,6 +381,23 @@ function viewLogin() {
       sessionStorage.removeItem("pendingEmail");
     };
     $("#restart").onclick = () => { sessionStorage.removeItem("pendingEmail"); viewLogin(); };
+    // Resend, with the same 60 s cooldown Supabase enforces
+    const rb = $("#resend");
+    const cooldown = () => {
+      const left = 60 - Math.floor((Date.now() - +(sessionStorage.getItem("codeSentAt") || 0)) / 1000);
+      rb.disabled = left > 0;
+      rb.textContent = left > 0 ? `Resend code (${left}s)` : "Resend code";
+      if (left > 0 && document.body.contains(rb)) setTimeout(cooldown, 1000);
+    };
+    cooldown();
+    rb.onclick = async () => {
+      rb.disabled = true; rb.textContent = "Sending…";
+      const { error } = await sb.auth.signInWithOtp({ email: pending, options: { shouldCreateUser: true } });
+      if (error) { toast(error.message, "error"); rb.disabled = false; rb.textContent = "Resend code"; return; }
+      sessionStorage.setItem("codeSentAt", String(Date.now()));
+      toast(`New code sent to ${pending}.`, "success");
+      cooldown();
+    };
   }
 }
 
@@ -468,6 +509,10 @@ async function viewWorkspace() {
       <div class="dialog-row">
         <div class="dialog-icon" aria-hidden="true">💡</div>
         <p>Practice as much as you like, then submit <strong>one</strong> final input. Your final product gets its own page on the dashboard.</p>
+        <div class="intro-actions">
+          <a class="btn btn-sm" href="#/u/${esc(state.profile.username)}">👤 My account</a>
+          <button class="btn btn-sm" id="ws-logoff">⏻ Log Off</button>
+        </div>
       </div>`, { icon: "🖥️", cls: "intro-win" })}
 
     <div class="grid-2">
@@ -527,6 +572,7 @@ async function viewWorkspace() {
       <pre id="code" class="code" hidden></pre>`,
       { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow" id="preview-status">Ready</span><span class="status-bar-field" id="preview-progress"></span>` })}`;
 
+  $("#ws-logoff").onclick = () => logOff();
   const preview = $("#preview"), codeEl = $("#code"), statusEl = $("#preview-status"), progEl = $("#preview-progress");
   let currentHtml = "";
   const show = (html, label) => {
@@ -814,6 +860,57 @@ async function viewGallery() {
   });
 }
 
+
+// "My account" window, shown only on your own profile page.
+async function accountWindow(final) {
+  const uid = state.session.user.id;
+  const { count: used } = await sb.from("runs").select("id", { count: "exact", head: true }).eq("user_id", uid).eq("kind", "test");
+  const limit = state.settings?.test_limit ?? 0;
+  return win("My account", `
+    <div class="account">
+      <div class="account-avatar" aria-hidden="true">🧑‍💻</div>
+      <div class="account-info">
+        <div class="account-name">@${esc(state.profile.username)}</div>
+        <div class="muted small">${esc(state.session.user.email)} · <span title="Only you can see this">🔒 only visible to you</span></div>
+        <table class="props">
+          <tr><th>Practice runs</th><td>${used ?? 0}${limit > 0 ? ` of ${limit}` : ""} used</td></tr>
+          <tr><th>Final</th><td>${final ? (final.status === "generating" ? "⏳ Generating…" : "✔ Submitted " + esc(new Date(final.created_at).toLocaleString())) : state.settings?.final_open ? "Not submitted yet" : "Not submitted (closed)"}</td></tr>
+        </table>
+        <form id="rename-form" class="rename" hidden>
+          <label for="new-username">New user name:</label>
+          <input id="new-username" value="${esc(state.profile.username)}" maxlength="24" required />
+          <button class="btn btn-sm btn-primary" type="submit">Save</button>
+          <button class="btn btn-sm" type="button" id="rename-cancel">Cancel</button>
+        </form>
+      </div>
+    </div>
+    <div class="form-actions">
+      <a class="btn" href="#/">🖥️ My workspace</a>
+      <button class="btn" id="rename-btn">✏️ Change username</button>
+      <button class="btn btn-primary" id="acct-logoff">⏻ Log Off</button>
+    </div>`, { icon: "👤", cls: "account-win" });
+}
+
+function wireAccountWindow() {
+  if (!$("#acct-logoff")) return;
+  $("#acct-logoff").onclick = () => logOff();
+  const form = $("#rename-form"), input = $("#new-username");
+  $("#rename-btn").onclick = () => { form.hidden = false; input.focus(); input.select(); };
+  $("#rename-cancel").onclick = () => { form.hidden = true; input.value = state.profile.username; };
+  input.oninput = () => { input.value = input.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""); };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const username = input.value.trim();
+    if (username === state.profile.username) { form.hidden = true; return; }
+    if (!/^[a-z0-9_-]{3,24}$/.test(username)) return toast("3–24 characters: a–z, 0–9, - or _", "error");
+    const { error } = await sb.from("profiles").update({ username }).eq("id", state.profile.id);
+    if (error) return toast(error.code === "23505" ? "That username is taken." : error.message, "error");
+    await loadProfile();
+    toast(`You are now @${username}.`, "success");
+    location.hash = `#/u/${username}`;
+  };
+}
+
 async function viewUser(username, fullscreen = false) {
   const { data: profile } = await sb.from("profiles").select("id, username, created_at").eq("username", username).maybeSingle();
   if (!profile) {
@@ -842,12 +939,15 @@ async function viewUser(username, fullscreen = false) {
     return;
   }
 
+  const acct = isMe && state.session ? await accountWindow(final) : "";
+
   if (!final) {
-    app.innerHTML = win(`@${esc(username)}`, `
+    app.innerHTML = acct + win(`@${esc(username)}`, `
       <div class="dialog-row"><div class="dialog-icon" aria-hidden="true">📭</div>
         <p>${isMe ? "You haven't submitted your final yet." : "Hasn't submitted a final yet."}</p></div>
       <div class="form-actions">${isMe ? `<a class="btn btn-primary" href="#/">Go to my workspace</a>` : `<a class="btn" href="#/dashboard">← Dashboard</a>`}</div>`,
-      { icon: "👤", cls: "narrow", controls: false });
+      { icon: "👤", cls: isMe ? "" : "narrow", controls: false });
+    wireAccountWindow();
     return;
   }
 
@@ -859,7 +959,7 @@ async function viewUser(username, fullscreen = false) {
   const prev = idx > 0 ? names[idx - 1] : null;
   const next = idx >= 0 && idx < names.length - 1 ? names[idx + 1] : null;
 
-  app.innerHTML = `
+  app.innerHTML = `${acct}
     <div class="user-split">
     ${win(`@${esc(username)} · Input`, `
       <div class="prompt-box">${esc(final.prompt)}</div>
@@ -881,6 +981,7 @@ async function viewUser(username, fullscreen = false) {
       { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow">${final.status === "generating" ? "⏳ Generating…" : final.error ? `⚠ ${esc(final.error)}` : "Done"}</span>${final.status === "generating" ? `<span class="status-bar-field">${progressBar()}</span>` : ""}${idx >= 0 ? `<span class="status-bar-field">${idx + 1} of ${names.length}</span>` : ""}` })}
     </div>`;
 
+  wireAccountWindow();
   setIframe($("#out"), final.output_html);
   $("#code").textContent = final.output_html || "";
   $("#toggle-code").onclick = (e) => {

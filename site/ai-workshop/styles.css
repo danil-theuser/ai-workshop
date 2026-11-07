@@ -18,6 +18,7 @@
   --mono: "Lucida Console", "Courier New", Courier, monospace;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   font: 13px/1.45 var(--font);
@@ -491,3 +492,28 @@ div.io-frame { border: 1px solid var(--field-border); }
   .user-split, .io-grid { grid-template-columns: 1fr; }
   .io-frame { height: 380px; }
 }
+
+/* Log Off button on the taskbar */
+.task-logoff {
+  display: flex; align-items: center; gap: 5px; align-self: center; height: 25px; margin-right: 6px; padding: 0 10px;
+  border: 1px solid rgba(255,255,255,.55); border-radius: 3px; cursor: pointer; color: #fff; font: 12px var(--font);
+  background: linear-gradient(180deg, #f0874c, #d9601e 55%, #c14f12);
+  box-shadow: inset 1px 1px rgba(255,255,255,.35), 1px 1px 1px rgba(0,0,0,.3);
+}
+.task-logoff:hover { filter: brightness(1.1); }
+.task-logoff:active { filter: brightness(.88); }
+
+/* Account window */
+.account { display: flex; gap: 14px; align-items: flex-start; }
+.account-avatar { width: 56px; height: 56px; flex: none; display: grid; place-items: center; font-size: 32px; background: #fff; border: 2px solid #fff; border-radius: 6px; box-shadow: 0 0 0 1px #6c8bd4, 1px 1px 4px rgba(0,0,0,.3); }
+.account-info { flex: 1; min-width: 0; }
+.account-name { font: bold 16px var(--title-font); color: #0a246a; }
+.props { border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.props th { text-align: left; font-weight: normal; color: var(--muted); padding: 2px 14px 2px 0; white-space: nowrap; }
+.props td { padding: 2px 0; }
+.rename { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.rename input { width: auto; flex: 1; min-width: 140px; }
+.intro-win .dialog-row { align-items: center; }
+.intro-win .dialog-row p { flex: 1; }
+.intro-actions { display: flex; gap: 6px; flex: none; }
+@media (max-width: 640px) { .intro-win .dialog-row { flex-wrap: wrap; } .task-logoff { padding: 0 8px; } }
