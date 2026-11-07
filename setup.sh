@@ -102,9 +102,11 @@ SERVICE=$(echo "$KEYS" | jq -r '([.[] | select(.name=="service_role")] + [.[] | 
 if [ "${1:-}" != "--test" ]; then
   # --- 3. Database -----------------------------------------------------
   c_step "Database (tables, security rules, USF-only signup, storage bucket)"
-  mgmt POST "/projects/$PROJECT_REF/database/query" \
-    "$(jq -n --rawfile q supabase/migrations/0001_init.sql '{query:$q}')" >/dev/null || die "Migration failed."
-  c_ok "Migration applied"
+  for f in supabase/migrations/*.sql; do
+    mgmt POST "/projects/$PROJECT_REF/database/query" \
+      "$(jq -n --rawfile q "$f" '{query:$q}')" >/dev/null || die "Migration $f failed."
+    c_ok "Applied $(basename "$f")"
+  done
 
   # --- 4. Auth ---------------------------------------------------------
   c_step "Auth (email code sign-in)"

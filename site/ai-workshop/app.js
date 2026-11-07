@@ -165,9 +165,10 @@ async function uploadFiles(files) {
   return paths;
 }
 
-async function waitForRun(runId) {
+// Polls a run (or a chat turn) until it stops generating.
+async function waitForRow(table, id) {
   for (let i = 0; i < 200; i++) {
-    const { data } = await sb.from("runs").select("*").eq("id", runId).maybeSingle();
+    const { data } = await sb.from(table).select("*").eq("id", id).maybeSingle();
     if (data && data.status !== "generating") return data;
     await new Promise((r) => setTimeout(r, 3000));
   }
@@ -192,7 +193,7 @@ async function generate(kind, prompt, files, onProgress) {
     throw new Error(j.error || `Request failed (${res.status})`);
   }
 
-  let text = "", runId = null, finished = null;
+  let text = "", runId = null, turnId = null, finished = null;
   try {
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
@@ -205,7 +206,7 @@ async function generate(kind, prompt, files, onProgress) {
         const line = buf.slice(0, i); buf = buf.slice(i + 2);
         if (!line.startsWith("data:")) continue;
         const d = JSON.parse(line.slice(5));
-        if (d.type === "start") runId = d.runId;
+        if (d.type === "start") { runId = d.runId; turnId = d.turnId; }
         else if (d.type === "delta") { text += d.text; onProgress?.(text); }
         else if (d.type === "done") finished = d;
         else if (d.type === "error") throw new Error(d.message);
@@ -217,9 +218,11 @@ async function generate(kind, prompt, files, onProgress) {
   }
   // Read the saved result (also covers a dropped connection mid-stream).
   if (!runId) throw new Error("Lost connection before the run started.");
-  const run = finished ? (await sb.from("runs").select("*").eq("id", runId).single()).data : await waitForRun(runId);
-  if (run.status === "error") throw new Error(run.error || "Generation failed.");
-  return run;
+  // Follow-ups are saved as a chat turn; everything else as a run.
+  const [table, id] = kind === "followup" ? ["chat_turns", turnId] : ["runs", runId];
+  const row = finished ? (await sb.from(table).select("*").eq("id", id).single()).data : await waitForRow(table, id);
+  if (row.status === "error") throw new Error(row.error || "Generation failed.");
+  return row;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +493,45 @@ function wireFileInput(id) {
   return { get: () => files, clear: () => { files = []; draw(); } };
 }
 
+
+// Chat counts: inputs = messages that didn't fail, outputs = finished versions.
+function chatCounts(turns, run) {
+  if (!turns?.length) return { inputs: 1, outputs: run?.status === "done" ? 1 : 0 };
+  return {
+    inputs: turns.filter((t) => t.status !== "error").length,
+    outputs: turns.filter((t) => t.status === "done").length,
+  };
+}
+// "1 input · 1 output" — any number above 1 is red.
+function countsHtml({ inputs, outputs }, { compact = false } = {}) {
+  const n = (v, word) => `<span class="cnt ${v > 1 ? "cnt-red" : ""}" title="${v} ${word}${v === 1 ? "" : "s"}">${v}</span>${compact ? "" : ` ${word}${v === 1 ? "" : "s"}`}`;
+  const over = inputs > 1 || outputs > 1;
+  return `<span class="counts ${over ? "counts-over" : "counts-ok"}" title="${inputs} input${inputs === 1 ? "" : "s"}, ${outputs} output${outputs === 1 ? "" : "s"}${over ? "" : " (one-shot)"}">${compact ? "💬 " : ""}${n(inputs, "input")}${compact ? " / " : " · "}${n(outputs, "output")}</span>`;
+}
+
+// Transcript of a final's chat. Output items are buttons that show that version.
+function chatTranscript(turns, { selectedId = null, mine = false } = {}) {
+  let out = 0;
+  return turns.map((t) => {
+    const failed = t.status === "error";
+    const inputNo = turns.filter((x) => x.n <= t.n && x.status !== "error").length;
+    if (t.status === "done") out++;
+    return `
+      <div class="msg msg-user ${failed ? "msg-failed" : ""}">
+        <div class="msg-head"><span>${mine ? "You" : "Input"}${failed ? "" : ` · input #${inputNo}`}</span><span class="muted">${timeAgo(t.created_at)}</span></div>
+        <div class="msg-text">${esc(t.prompt)}</div>
+        ${t.attachments?.length ? `<div class="msg-files">${t.attachments.map((a) => `<a href="${esc(a.url)}" target="_blank" rel="noopener">${fileIcon(a.name)} ${esc(a.name)}</a>`).join("")}</div>` : ""}
+      </div>
+      ${t.status === "done" ? `
+        <button type="button" class="msg msg-ai ${t.id === selectedId ? "selected" : ""}" data-turn="${t.id}">
+          <span class="msg-head"><span>🤖 Claude · output #${out}</span><span class="muted">${t.id === selectedId ? "showing" : "view"}</span></span>
+          <span class="msg-text">${t.error ? `⚠ ${esc(t.error)}` : "✅ Built a version of the product. Click to view it."}</span>
+        </button>` : t.status === "generating" ? `
+        <div class="msg msg-ai msg-pending"><span class="msg-head"><span>🤖 Claude</span></span><span class="msg-text">Building…</span>${progressBar()}</div>` : `
+        <div class="msg msg-ai msg-failed"><span class="msg-head"><span>🤖 Claude · failed</span><span class="muted">not counted</span></span><span class="msg-text">⚠ ${esc(t.error || "Generation failed.")}</span></div>`}`;
+  }).join("");
+}
+
 const progressBar = () => `<div class="progress" role="progressbar" aria-label="Generating"><div class="progress-marquee"></div></div>`;
 
 async function viewWorkspace() {
@@ -499,6 +541,14 @@ async function viewWorkspace() {
     sb.from("runs").select("id, status, error, created_at").eq("user_id", uid).eq("kind", "final").neq("status", "error").limit(1),
   ]);
   const final = finals?.[0];
+  const { data: turns } = final
+    ? await sb.from("chat_turns").select("*").eq("run_id", final.id).order("n")
+    : { data: [] };
+  const counts = chatCounts(turns, final);
+  const latestDone = [...(turns || [])].reverse().find((t) => t.status === "done" && t.output_html);
+  const chatLimit = state.settings.chat_limit ?? 0;
+  const chatBusy = (turns || []).some((t) => t.status === "generating") || final?.status === "generating";
+  const canChat = final && state.settings.final_open && !chatBusy && (chatLimit === 0 || counts.inputs < chatLimit);
   const limit = state.settings.test_limit;
   const used = tests?.length ?? 0;
   const left = limit > 0 ? Math.max(0, limit - used) : Infinity;
@@ -541,27 +591,36 @@ async function viewWorkspace() {
         { icon: "📝", status: `<span class="status-bar-field">${limit > 0 ? `${left} of ${limit} runs left` : "Unlimited runs"}</span><span class="status-bar-field">${used} used</span>` })}
 
       ${win("2 · Final submission", final ? `
-          <div class="dialog-row">
-            <div class="dialog-icon" aria-hidden="true">🏆</div>
-            <div>
-              <p>You submitted your final ${timeAgo(final.created_at)}.</p>
-              ${final.status === "generating" ? `<p class="muted">It's still being generated… your page will be ready shortly.</p>${progressBar()}` : ""}
-            </div>
+          <div class="toolbar chat-toolbar">
+            <span>${countsHtml(counts)}</span>
+            <a class="btn btn-sm" href="#/u/${esc(state.profile.username)}">My product page →</a>
           </div>
-          <div class="form-actions"><a class="btn btn-primary" href="#/u/${esc(state.profile.username)}">View your product page →</a></div>
+          <div class="chat" id="chat">${chatTranscript(turns || [], { selectedId: latestDone?.id, mine: true })}</div>
+          ${canChat ? `
+          <form id="chat-form" class="stack chat-form">
+            <textarea id="chat-prompt" rows="3" maxlength="8000" placeholder="Ask for a change… (this would be input #${counts.inputs + 1})" required></textarea>
+            ${fileInputBlock("chat-files")}
+            <div class="form-actions">
+              <span class="muted small chat-hint">1 input + 1 output is a perfect one-shot. Every extra message is counted and shown in <span class="cnt-red">red</span> to everyone.</span>
+              <button class="btn btn-primary" type="submit">Send ➤</button>
+            </div>
+          </form>` : `
+          <p class="muted small chat-locked">${chatBusy ? "⏳ Claude is building… you can send another message when it's done."
+            : !state.settings.final_open ? "🔒 Final submissions are closed, so the chat is locked."
+            : `🔒 This chat reached its limit of ${chatLimit} messages.`}</p>`}
         ` : !state.settings.final_open ? `
           <div class="dialog-row"><div class="dialog-icon" aria-hidden="true">🚫</div><p>Final submissions are closed.</p></div>
         ` : `
-          <p class="muted small">You get <strong>one</strong> final. It will be public on the dashboard.</p>
+          <p class="muted small">Your final is a <strong>chat</strong> and it's public. Aim for a one-shot: 1 input and 1 output. You can send follow-ups to refine it, but every extra input and output is counted and shown in <span class="cnt-red">red</span>.</p>
           <form id="final-form" class="stack">
-            <textarea id="final-prompt" rows="8" maxlength="8000" placeholder="Your one final input…" required></textarea>
+            <textarea id="final-prompt" rows="8" maxlength="8000" placeholder="Your final input…" required></textarea>
             ${fileInputBlock("final-files")}
             <div class="form-actions">
               <button class="btn" type="button" id="copy-practice">📋 Copy from practice box</button>
               <button class="btn btn-primary" type="submit">Submit final</button>
             </div>
           </form>`,
-        { icon: "🏁", cls: "card-final", status: `<span class="status-bar-field">${final ? "✔ Submitted" : state.settings.final_open ? "● Open" : "Closed"}</span>` })}
+        { icon: "🏁", cls: "card-final", status: `<span class="status-bar-field">${final ? "✔ Submitted" : state.settings.final_open ? "● Open" : "Closed"}</span>${final ? `<span class="status-bar-field grow">${counts.inputs} input${counts.inputs === 1 ? "" : "s"} · ${counts.outputs} output${counts.outputs === 1 ? "" : "s"}</span>` : ""}` })}
     </div>
 
     ${win(`<span id="preview-title">Preview</span>`, `
@@ -581,7 +640,23 @@ async function viewWorkspace() {
     codeEl.textContent = currentHtml;
     if (label) $("#preview-title").textContent = label;
   };
-  show(tests?.find((t) => t.output_html)?.output_html, tests?.length ? "Latest practice run" : "Preview");
+  if (latestDone) show(latestDone.output_html, `Your final · output #${counts.outputs}`);
+  else show(tests?.find((t) => t.output_html)?.output_html, tests?.length ? "Latest practice run" : "Preview");
+
+  // Chat: click an output to preview that version
+  const chatEl = $("#chat");
+  if (chatEl) {
+    chatEl.scrollTop = chatEl.scrollHeight;
+    chatEl.querySelectorAll("[data-turn]").forEach((b) => (b.onclick = () => {
+      const t = turns.find((x) => x.id === b.dataset.turn);
+      chatEl.querySelectorAll(".msg-ai.selected").forEach((x) => { x.classList.remove("selected"); x.querySelector(".msg-head .muted").textContent = "view"; });
+      b.classList.add("selected"); b.querySelector(".msg-head .muted").textContent = "showing";
+      show(t.output_html, `Your final · ${b.querySelector(".msg-head span").textContent.replace("🤖 Claude · ", "")}`);
+      statusEl.textContent = t.error ? `⚠ ${t.error}` : "Done";
+      preview.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
+  }
+  if (chatBusy) setTimeout(() => { if (!state.busy && (location.hash === "#/" || location.hash === "")) render(); }, 5000);
 
   $("#toggle-code").onclick = (e) => {
     codeEl.hidden = !codeEl.hidden;
@@ -610,7 +685,7 @@ async function viewWorkspace() {
     const original = button.innerHTML;
     button.disabled = true; button.textContent = "Generating…";
     preview.scrollIntoView({ behavior: "smooth", block: "start" });
-    $("#preview-title").textContent = kind === "final" ? "Generating your final product…" : "Generating practice run…";
+    $("#preview-title").textContent = { final: "Generating your final product…", followup: "Revising your final…" }[kind] || "Generating practice run…";
     document.body.classList.add("busy");
     progEl.innerHTML = progressBar();
     const started = Date.now();
@@ -659,14 +734,36 @@ async function viewWorkspace() {
       const nFiles = finalFiles.get().length;
       const ok = await confirmModal({
         title: "Are you sure you want to submit?",
-        body: `<p>This is your <strong>one and only</strong> final submission. You can't change it afterwards.</p>
+        body: `<p>This starts your <strong>one and only</strong> final. It will be public.</p>
+               <p class="small">Afterwards you can keep chatting to refine it, but every extra input and output is counted and shown in <span class="cnt-red">red</span> to everyone.</p>
                <blockquote>${esc(prompt.slice(0, 400))}${prompt.length > 400 ? "…" : ""}</blockquote>
                ${nFiles ? `<p class="muted small">+ ${nFiles} reference file${nFiles > 1 ? "s" : ""}</p>` : ""}`,
         confirmText: "Yes, submit",
       });
       if (!ok) return;
       const run = await runWithProgress("final", prompt, finalFiles.get(), ff.querySelector("button[type=submit]"));
-      if (run) { toast("Final submitted! 🎉", "success"); location.hash = `#/u/${state.profile.username}`; }
+      if (run) { toast("Final submitted! 🎉 1 input · 1 output so far.", "success"); viewWorkspace(); }
+    };
+  }
+
+  const cf = $("#chat-form");
+  if (cf) {
+    const chatFiles = wireFileInput("chat-files");
+    cf.onsubmit = async (e) => {
+      e.preventDefault();
+      const prompt = $("#chat-prompt").value.trim();
+      if (!prompt) return;
+      const next = counts.inputs + 1;
+      const ok = await confirmModal({
+        title: "Send a follow-up?",
+        body: `<p>This will be input <strong class="cnt-red">#${next}</strong>. Claude will rebuild your product with this change.</p>
+               <blockquote>${esc(prompt.slice(0, 400))}${prompt.length > 400 ? "…" : ""}</blockquote>
+               <p class="small">Everyone will see <span class="counts counts-over"><span class="cnt cnt-red">${next}</span> inputs</span> on your final.</p>`,
+        confirmText: "Send",
+      });
+      if (!ok) return;
+      const turn = await runWithProgress("followup", prompt, chatFiles.get(), cf.querySelector("button[type=submit]"));
+      if (turn) { toast(`Output #${counts.outputs + 1} is ready.`, "success"); viewWorkspace(); }
     };
   }
 }
@@ -676,11 +773,12 @@ async function viewWorkspace() {
 const DASH_POLL_MS = 30000;
 
 async function dashSignature() {
-  const [{ data: ps }, { data: fs }] = await Promise.all([
+  const [{ data: ps }, { data: fs }, { data: ts }] = await Promise.all([
     sb.from("profiles").select("id"),
     sb.from("runs").select("id, status").eq("kind", "final").neq("status", "error"),
+    sb.from("chat_turns").select("id, status"),
   ]);
-  return `${(ps || []).length}|${(fs || []).map((f) => f.id + f.status).sort().join(",")}`;
+  return `${(ps || []).length}|${(fs || []).map((f) => f.id + f.status).sort().join(",")}|${(ts || []).map((t) => t.id + t.status).sort().join(",")}`;
 }
 
 
@@ -723,7 +821,7 @@ async function viewDashboard({ refresh = false } = {}) {
   if (!refresh) app.innerHTML = win("Dashboard", `<p>Loading dashboard…</p>${progressBar()}`, { icon: "🗂️", cls: "narrow", controls: false });
   const [{ data: profiles, error: pErr }, { data: finals, error: fErr }] = await Promise.all([
     sb.from("profiles").select("id, username, created_at").order("username"),
-    sb.from("runs").select("id, user_id, prompt, status, created_at, output_html").eq("kind", "final").neq("status", "error"),
+    sb.from("runs").select("id, user_id, prompt, status, created_at, output_html, chat_turns(status)").eq("kind", "final").neq("status", "error"),
   ]);
   if (pErr || fErr) throw new Error((pErr || fErr).message);
   if (location.hash !== "#/dashboard") return; // navigated away while loading
@@ -751,6 +849,7 @@ async function viewDashboard({ refresh = false } = {}) {
               : `<div class="thumb-empty">${r.final ? "⏳ Generating…" : "Not submitted yet"}</div>`}
           </div>
           <div class="tile-body">
+            ${r.final ? `<div class="tile-counts">${countsHtml(chatCounts(r.final.chat_turns, r.final))}</div>` : ""}
             <p class="small">${r.final ? esc(r.final.prompt.slice(0, 110)) + (r.final.prompt.length > 110 ? "…" : "") : "—"}</p>
           </div>
         </a>`).join("") || `<p class="muted">No participants yet.</p>`}
@@ -792,11 +891,12 @@ async function viewDashboard({ refresh = false } = {}) {
 async function viewGallery() {
   app.innerHTML = win("Inputs & outputs", `<p>Loading…</p>${progressBar()}`, { icon: "🖼️", cls: "narrow", controls: false });
   const { data, error } = await sb.from("runs")
-    .select("id, prompt, attachments, status, created_at, model, output_html, profiles(username)")
+    .select("id, prompt, attachments, status, created_at, model, output_html, profiles(username), chat_turns(id, n, prompt, attachments, status, error, created_at)")
     .eq("kind", "final").neq("status", "error").order("created_at", { ascending: true });
   if (error) throw new Error(error.message);
   if (location.hash !== "#/gallery") return;
   const items = (data || []).filter((f) => f.profiles?.username);
+  items.forEach((f) => { f.chat_turns = (f.chat_turns || []).sort((a, b) => a.n - b.n); f.counts = chatCounts(f.chat_turns, f); });
 
   app.innerHTML = `
     ${win("Inputs & outputs · All submissions", `
@@ -809,20 +909,19 @@ async function viewGallery() {
       </div>
       <div class="dialog-row">
         <div class="dialog-icon" aria-hidden="true">🖼️</div>
-        <p>What every participant asked for, next to what Claude built from it. Click into an output to try it. Practice runs stay private; only final submissions are shown.</p>
+        <p>What every participant asked for, next to what Claude built from it. Each final is a chat: <strong>1 input · 1 output</strong> is a perfect one-shot, and anything above 1 shows in <span class="cnt-red">red</span>. Click an output in a chat to see that version. Practice runs stay private.</p>
       </div>`, {
         icon: "🖼️", cls: "intro-win",
         status: `<span class="status-bar-field">${items.length} submission${items.length === 1 ? "" : "s"}</span><span class="status-bar-field grow" id="search-count"></span><span class="status-bar-field" id="g-new" hidden></span>`,
       })}
     ${items.map((f, i) => {
       const u = esc(f.profiles.username);
-      return `<div class="io-item" data-q="${esc((f.profiles.username + " " + f.prompt).toLowerCase())}">
-        ${win(`#${i + 1} · @${u}`, `
+      return `<div class="io-item" data-q="${esc((f.profiles.username + " " + [f.prompt, ...f.chat_turns.map((t) => t.prompt)].join(" ")).toLowerCase())}">
+        ${win(`#${i + 1} · @${u} &nbsp;${countsHtml(f.counts, { compact: true })}`, `
           <div class="io-grid">
             <div class="io-input">
-              <h3 class="io-label">📝 Input</h3>
-              <div class="prompt-box">${esc(f.prompt)}</div>
-              ${refsHtml(f.attachments)}
+              <div class="io-label-row"><h3 class="io-label">💬 Chat</h3>${countsHtml(f.counts)}</div>
+              <div class="chat chat-public" data-chat="${i}">${f.chat_turns.length ? chatTranscript(f.chat_turns, { selectedId: [...f.chat_turns].reverse().find((t) => t.status === "done")?.id }) : `<div class="prompt-box">${esc(f.prompt)}</div>`}</div>
             </div>
             <div class="io-output">
               <div class="io-label-row">
@@ -832,7 +931,7 @@ async function viewGallery() {
                   <a class="btn btn-sm btn-primary" href="#/site/${u}">Full screen ↗</a>
                 </div>
               </div>
-              ${f.output_html ? `<iframe class="preview io-frame" sandbox="${SANDBOX}" data-i="${i}" title="@${u}'s product"></iframe>`
+              ${f.output_html ? `<iframe class="preview io-frame" sandbox="${SANDBOX}" data-i="${i}" title="@${u}'s product"></iframe><div class="muted small io-version" data-version="${i}">${f.counts.outputs > 1 ? `Showing output #${f.counts.outputs} (latest)` : ""}</div>`
                 : `<div class="io-frame thumb-empty">⏳ Still generating…</div>`}
             </div>
           </div>`, {
@@ -843,6 +942,24 @@ async function viewGallery() {
     }).join("") || win("Nothing yet", `<div class="dialog-row"><div class="dialog-icon" aria-hidden="true">📭</div><p>No final submissions yet. Check back soon.</p></div>`, { icon: "📭", cls: "narrow", controls: false })}`;
 
   lazyFrames([...document.querySelectorAll(".io-frame[data-i]")], (fr) => items[+fr.dataset.i].output_html);
+
+  // Click an output in a chat to load that version next to it
+  document.querySelectorAll(".chat[data-chat]").forEach((chat) => {
+    const i = +chat.dataset.chat, f = items[i];
+    chat.scrollTop = chat.scrollHeight;
+    chat.querySelectorAll("[data-turn]").forEach((b) => (b.onclick = async () => {
+      const frame = document.querySelector(`.io-frame[data-i="${i}"]`);
+      if (!frame) return;
+      chat.querySelectorAll(".msg-ai.selected").forEach((x) => { x.classList.remove("selected"); x.querySelector(".msg-head .muted").textContent = "view"; });
+      b.classList.add("selected"); b.querySelector(".msg-head .muted").textContent = "loading…";
+      const { data: t } = await sb.from("chat_turns").select("output_html").eq("id", b.dataset.turn).single();
+      frame.srcdoc = t?.output_html || "";
+      b.querySelector(".msg-head .muted").textContent = "showing";
+      const label = b.querySelector(".msg-head span").textContent.replace("🤖 Claude · ", "").replace("output", "Output");
+      const latest = [...f.chat_turns].reverse().find((x) => x.status === "done")?.id === b.dataset.turn;
+      document.querySelector(`[data-version="${i}"]`).textContent = `Showing ${label}${latest ? " (latest)" : ""}`;
+    }));
+  });
 
   const blocks = [...document.querySelectorAll(".io-item")];
   $("#search").oninput = (e) => {
@@ -940,6 +1057,10 @@ async function viewUser(username, fullscreen = false) {
   }
 
   const acct = isMe && state.session ? await accountWindow(final) : "";
+  const { data: turnRows } = final ? await sb.from("chat_turns").select("*").eq("run_id", final.id).order("n") : { data: [] };
+  const turns = turnRows?.length ? turnRows : final ? [{ ...final, n: 1 }] : [];
+  const counts = chatCounts(turnRows, final);
+  const latestDone = [...turns].reverse().find((t) => t.status === "done" && t.output_html);
 
   if (!final) {
     app.innerHTML = acct + win(`@${esc(username)}`, `
@@ -961,12 +1082,12 @@ async function viewUser(username, fullscreen = false) {
 
   app.innerHTML = `${acct}
     <div class="user-split">
-    ${win(`@${esc(username)} · Input`, `
-      <div class="prompt-box">${esc(final.prompt)}</div>
-      ${refsHtml(final.attachments)}`,
-      { icon: "📝", cls: "user-input", status: `<span class="status-bar-field grow">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}
+    ${win(`@${esc(username)} · Chat`, `
+      <div class="toolbar chat-toolbar"><span>${countsHtml(counts)}</span></div>
+      <div class="chat chat-public" id="chat">${chatTranscript(turns, { selectedId: latestDone?.id, mine: isMe })}</div>`,
+      { icon: "💬", cls: "user-input", status: `<span class="status-bar-field grow">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}
 
-    ${win(`@${esc(username)} · Output`, `
+    ${win(`@${esc(username)} · <span id="out-title">${counts.outputs > 1 ? `Output #${counts.outputs} (latest)` : "Output"}</span>`, `
       <div class="toolbar">
         <a class="btn btn-sm" href="#/dashboard">🗂️ Dashboard</a>
         <a class="btn btn-sm ${prev ? "" : "is-disabled"}" ${prev ? `href="#/u/${esc(prev)}" title="@${esc(prev)}"` : 'aria-disabled="true"'}>◀ Previous</a>
@@ -983,6 +1104,19 @@ async function viewUser(username, fullscreen = false) {
 
   wireAccountWindow();
   setIframe($("#out"), final.output_html);
+  let shownHtml = final.output_html || "";
+  const chatEl = $("#chat");
+  chatEl.scrollTop = chatEl.scrollHeight;
+  chatEl.querySelectorAll("[data-turn]").forEach((b) => (b.onclick = () => {
+    const t = turns.find((x) => x.id === b.dataset.turn);
+    chatEl.querySelectorAll(".msg-ai.selected").forEach((x) => { x.classList.remove("selected"); x.querySelector(".msg-head .muted").textContent = "view"; });
+    b.classList.add("selected"); b.querySelector(".msg-head .muted").textContent = "showing";
+    shownHtml = t.output_html || "";
+    setIframe($("#out"), shownHtml);
+    $("#code").textContent = shownHtml;
+    const label = b.querySelector(".msg-head span").textContent.replace("🤖 Claude · ", "").replace("output", "Output");
+    $("#out-title").textContent = t.id === latestDone?.id && counts.outputs > 1 ? `${label} (latest)` : label;
+  }));
   $("#code").textContent = final.output_html || "";
   $("#toggle-code").onclick = (e) => {
     const c = $("#code"); c.hidden = !c.hidden; $("#out").hidden = !c.hidden;
@@ -990,10 +1124,10 @@ async function viewUser(username, fullscreen = false) {
   };
   $("#download").onclick = () => {
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([final.output_html || ""], { type: "text/html" }));
+    a.href = URL.createObjectURL(new Blob([shownHtml], { type: "text/html" }));
     a.download = `${username}.html`; a.click();
   };
-  if (final.status === "generating") setTimeout(() => { if (location.hash === `#/u/${username}`) render(); }, 5000);
+  if (final.status === "generating" || turns.some((t) => t.status === "generating")) setTimeout(() => { if (location.hash === `#/u/${username}`) render(); }, 5000);
 }
 
 // ---------------------------------------------------------------------------

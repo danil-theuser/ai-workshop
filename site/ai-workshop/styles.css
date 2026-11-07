@@ -517,3 +517,47 @@ div.io-frame { border: 1px solid var(--field-border); }
 .intro-win .dialog-row p { flex: 1; }
 .intro-actions { display: flex; gap: 6px; flex: none; }
 @media (max-width: 640px) { .intro-win .dialog-row { flex-wrap: wrap; } .task-logoff { padding: 0 8px; } }
+
+/* ---------------------------------------------------------------------
+   Final chat + input/output counts
+   --------------------------------------------------------------------- */
+.counts {
+  display: inline-block; white-space: nowrap; vertical-align: middle;
+  padding: 1px 7px; border: 1px solid #aca899; border-radius: 3px; background: #fff;
+  font-size: 12px; color: #000; text-shadow: none; font-weight: normal; font-family: var(--font);
+}
+.counts-ok { border-color: #6fae6f; background: #f1fbef; }
+.counts-over { border-color: #d9534f; background: #fff1f0; }
+.cnt { font-weight: bold; }
+.cnt-red { color: #d40000 !important; font-weight: bold; }
+.title-bar .counts { padding: 0 6px; font-size: 11px; line-height: 17px; }
+.tile-counts { margin-bottom: 4px; }
+.chat-toolbar { justify-content: space-between; }
+
+.chat {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 340px; overflow: auto; padding: 8px;
+  background: #fff; border: 1px solid var(--field-border);
+}
+.chat-public { max-height: 460px; }
+.user-input .chat-public { max-height: 62vh; }
+.msg {
+  display: block; width: auto; text-align: left; font: 12px/1.4 var(--font); color: #000;
+  border: 1px solid #c9c5b3; border-radius: 6px; padding: 5px 8px; background: #fff;
+}
+.msg-head { display: flex; justify-content: space-between; gap: 8px; font-weight: bold; font-size: 11px; color: #0a246a; margin-bottom: 2px; }
+.msg-head .muted { font-weight: normal; }
+.msg-text { display: block; white-space: pre-wrap; word-break: break-word; }
+.msg-user { background: #eef3fd; border-color: #a8bfe8; margin-right: 18px; }
+.msg-ai { background: #f6f5ee; margin-left: 18px; }
+button.msg-ai { cursor: pointer; }
+button.msg-ai:hover { background: #fff8dc; border-color: #e5a01a; }
+.msg-ai.selected { background: #e1ecfb; border-color: var(--select); box-shadow: inset 3px 0 var(--select); }
+.msg-failed { opacity: .7; border-style: dashed; }
+.msg-failed .msg-text { color: #8b1a14; }
+.msg-pending .progress { width: 100%; margin-top: 4px; }
+.msg-files { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 3px; font-size: 11px; }
+.chat-form textarea { min-height: 70px; }
+.chat-hint { flex: 1; align-self: center; text-align: left; }
+.chat-locked { margin: 8px 0 0; }
+.io-version { margin-top: 3px; min-height: 1em; }

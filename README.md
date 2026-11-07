@@ -97,9 +97,11 @@ All controls are in **Supabase → Table Editor → `settings`** (one row):
 | `test_limit` | `25` | Practice runs per person. `0` = unlimited. |
 | `model` | `claude-sonnet-5-5` | Model used for every run. `claude-haiku-5-5` is faster and cheaper; `claude-opus-5-5` is strongest and slowest. |
 | `max_tokens` | `16000` | Maximum size of each generated product. |
+| `chat_limit` | `20` | Max messages in a final chat, including the first. `0` = unlimited. |
 
 Other things you can do:
-- **Let someone resubmit:** in `runs`, set their final's `status` to `error`.
+- **Final chats:** each final is a chat. The first message builds the product; follow-ups revise it, and the latest version is what everyone sees. Inputs and outputs are counted (failed generations don't count) and shown on the dashboard, the Inputs & outputs page and each person's page. 1 input · 1 output is a one-shot; any number above 1 is red. The messages are in the `chat_turns` table.
+- **Let someone resubmit:** in `runs`, set their final's `status` to `error` (this starts their chat over).
 - **Change the rules of the game:** edit `SYSTEM_PROMPT` at the top of `supabase/functions/generate/index.ts` and redeploy.
 - **Watch spend:** Anthropic Console → Usage. Each run's token counts are also in the `runs` table.
 
