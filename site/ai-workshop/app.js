@@ -1,7 +1,7 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY, EVENT_NAME, EVENT_TAGLINE, ALLOWED_DOMAINS, EVENTS_HOME_URL,
-} from "./config.js";
+} from "./config.js?v=__BUILD__";
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -772,7 +772,24 @@ async function render() {
   }
 }
 
+// Each deploy stamps __BUILD__ with the commit id (see .github/workflows/pages.yml).
+// GitHub Pages lets browsers cache files for 10 minutes, so if a newer
+// version has been published, reload once onto it.
+const BUILD = "__BUILD__";
+async function ensureLatest() {
+  if (BUILD.startsWith("__")) return; // local dev
+  try {
+    const r = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" });
+    const { build } = await r.json();
+    if (build && build !== BUILD && sessionStorage.getItem("reloadedFor") !== build) {
+      sessionStorage.setItem("reloadedFor", build);
+      location.replace(`${location.pathname}?v=${build}${location.hash}`);
+    }
+  } catch { /* offline or missing: keep going */ }
+}
+
 async function init() {
+  ensureLatest();
   if (!configured) return render();
   const { data: { session } } = await sb.auth.getSession();
   state.session = session;

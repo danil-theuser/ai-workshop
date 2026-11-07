@@ -19,6 +19,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp build id (cache busting)
+        run: |
+          BUILD="${GITHUB_SHA::8}"
+          sed -i "s/__BUILD__/$BUILD/g" site/ai-workshop/index.html site/ai-workshop/app.js site/ai-workshop/version.json
+          grep -q "$BUILD" site/ai-workshop/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
