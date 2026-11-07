@@ -624,28 +624,45 @@ async function viewWorkspace() {
   }
 }
 
-async function viewDashboard() {
-  app.innerHTML = win("Dashboard", `<p>Loading dashboard…</p>${progressBar()}`, { icon: "🗂️", cls: "narrow", controls: false });
-  const [{ data: profiles }, { data: finals }] = await Promise.all([
+// Dashboard: every participant's final product. Polls every 30 s for new or
+// finished submissions (a cheap query), and only redraws when something changed.
+const DASH_POLL_MS = 30000;
+
+async function dashSignature() {
+  const [{ data: ps }, { data: fs }] = await Promise.all([
+    sb.from("profiles").select("id"),
+    sb.from("runs").select("id, status").eq("kind", "final").neq("status", "error"),
+  ]);
+  return `${(ps || []).length}|${(fs || []).map((f) => f.id + f.status).sort().join(",")}`;
+}
+
+async function viewDashboard({ refresh = false } = {}) {
+  if (!refresh) app.innerHTML = win("Dashboard", `<p>Loading dashboard…</p>${progressBar()}`, { icon: "🗂️", cls: "narrow", controls: false });
+  const [{ data: profiles, error: pErr }, { data: finals, error: fErr }] = await Promise.all([
     sb.from("profiles").select("id, username, created_at").order("username"),
     sb.from("runs").select("id, user_id, prompt, status, created_at, output_html").eq("kind", "final").neq("status", "error"),
   ]);
+  if (pErr || fErr) throw new Error((pErr || fErr).message);
+  if (location.hash !== "#/dashboard") return; // navigated away while loading
   const byUser = new Map((finals || []).map((f) => [f.user_id, f]));
   const rows = (profiles || []).map((p) => ({ ...p, final: byUser.get(p.id) }))
     .sort((a, b) => (!!b.final - !!a.final) || (a.final && b.final ? new Date(a.final.created_at) - new Date(b.final.created_at) : a.username.localeCompare(b.username)));
   const submitted = rows.filter((r) => r.final).length;
+  const prevQuery = refresh ? ($("#search")?.value || "") : "";
+  const prevScroll = window.scrollY;
 
   app.innerHTML = win("Dashboard · All products", `
     <div class="toolbar">
       <label class="search-label" for="search">🔍 Search:</label>
-      <input id="search" class="search" placeholder="Username or input…" />
+      <input id="search" class="search" placeholder="Username or input…" value="${esc(prevQuery)}" />
+      <button class="btn btn-sm" id="dash-refresh" title="Refresh">🔄 Refresh</button>
     </div>
     <div class="gallery" id="gallery">
       ${rows.map((r) => `
         <a class="tile ${r.final ? "" : "tile-empty"}" href="#/u/${esc(r.username)}" data-q="${esc((r.username + " " + (r.final?.prompt || "")).toLowerCase())}">
           <div class="tile-title"><span aria-hidden="true">${r.final ? "🌐" : "📁"}</span> @${esc(r.username)}</div>
           <div class="thumb">
-            ${r.final?.output_html ? `<iframe sandbox="" loading="lazy" tabindex="-1" title="${esc(r.username)} preview" data-html="1"></iframe>`
+            ${r.final?.output_html ? `<iframe sandbox="allow-scripts" tabindex="-1" aria-hidden="true" title="${esc(r.username)} preview" data-html="1"></iframe>`
               : `<div class="thumb-empty">${r.final ? "⏳ Generating…" : "Not submitted yet"}</div>`}
           </div>
           <div class="tile-body">
@@ -654,23 +671,44 @@ async function viewDashboard() {
         </a>`).join("") || `<p class="muted">No participants yet.</p>`}
     </div>`, {
       icon: "🗂️", cls: "dash-win",
-      status: `<span class="status-bar-field">${submitted} product${submitted === 1 ? "" : "s"} submitted</span><span class="status-bar-field">${rows.length} participant${rows.length === 1 ? "" : "s"}</span><span class="status-bar-field grow" id="search-count"></span>`,
+      status: `<span class="status-bar-field">${submitted} product${submitted === 1 ? "" : "s"} submitted</span><span class="status-bar-field">${rows.length} participant${rows.length === 1 ? "" : "s"}</span><span class="status-bar-field grow" id="search-count"></span><span class="status-bar-field">Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>`,
     });
+  if (refresh) window.scrollTo(0, prevScroll);
 
-  // Fill thumbnails (static render: scripts disabled to keep the page light)
+  // Live thumbnails (scripts allowed so JS-drawn products show up; still
+  // sandboxed without same-origin). Only rendered once scrolled into view.
   const tiles = [...document.querySelectorAll(".tile")];
-  tiles.forEach((tile, i) => {
-    const f = rows[i].final;
-    const fr = tile.querySelector("iframe[data-html]");
-    if (fr && f) fr.srcdoc = f.output_html;
-  });
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const i = tiles.indexOf(e.target.closest(".tile"));
+      e.target.srcdoc = rows[i].final.output_html;
+      io.unobserve(e.target);
+    }
+  }, { rootMargin: "200px" });
+  tiles.forEach((t) => { const fr = t.querySelector("iframe[data-html]"); if (fr) io.observe(fr); });
 
-  $("#search").oninput = (e) => {
-    const q = e.target.value.toLowerCase().trim();
+  const search = $("#search");
+  const applySearch = () => {
+    const q = search.value.toLowerCase().trim();
     let shown = 0;
     tiles.forEach((t) => { const ok = !q || t.dataset.q.includes(q); t.style.display = ok ? "" : "none"; shown += ok; });
     $("#search-count").textContent = q ? `${shown} match${shown === 1 ? "" : "es"}` : "";
   };
+  search.oninput = applySearch;
+  if (prevQuery) applySearch();
+
+  // Polling
+  clearInterval(state.dashTimer);
+  let sig = await dashSignature().catch(() => null);
+  const check = async () => {
+    if (location.hash !== "#/dashboard") return clearInterval(state.dashTimer);
+    if (document.hidden) return;
+    const now = await dashSignature().catch(() => null);
+    if (now && sig && now !== sig) { sig = now; viewDashboard({ refresh: true }); }
+  };
+  state.dashTimer = setInterval(check, DASH_POLL_MS);
+  $("#dash-refresh").onclick = () => viewDashboard({ refresh: true });
 }
 
 async function viewUser(username, fullscreen = false) {
@@ -710,10 +748,31 @@ async function viewUser(username, fullscreen = false) {
     return;
   }
 
+  // Previous / next submission, in dashboard order (oldest final first)
+  const { data: order } = await sb.from("runs").select("user_id, created_at, profiles(username)")
+    .eq("kind", "final").neq("status", "error").order("created_at", { ascending: true });
+  const names = (order || []).map((o) => o.profiles?.username).filter(Boolean);
+  const idx = names.indexOf(username);
+  const prev = idx > 0 ? names[idx - 1] : null;
+  const next = idx >= 0 && idx < names.length - 1 ? names[idx + 1] : null;
+
   const atts = final.attachments || [];
   app.innerHTML = `
+    ${win(`@${esc(username)}'s product`, `
+      <div class="toolbar">
+        <a class="btn btn-sm" href="#/dashboard">🗂️ Dashboard</a>
+        <a class="btn btn-sm ${prev ? "" : "is-disabled"}" ${prev ? `href="#/u/${esc(prev)}" title="@${esc(prev)}"` : 'aria-disabled="true"'}>◀ Previous</a>
+        <a class="btn btn-sm ${next ? "" : "is-disabled"}" ${next ? `href="#/u/${esc(next)}" title="@${esc(next)}"` : 'aria-disabled="true"'}>Next ▶</a>
+        <span class="toolbar-sep"></span>
+        <button class="btn btn-sm" id="toggle-code">📄 Show code</button>
+        <button class="btn btn-sm" id="download">💾 Download HTML</button>
+        <a class="btn btn-sm btn-primary" href="#/site/${esc(username)}">Open full screen ↗</a>
+      </div>
+      <iframe id="out" class="preview preview-tall" sandbox="${SANDBOX}" title="@${esc(username)}'s product"></iframe>
+      <pre id="code" class="code" hidden></pre>`,
+      { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow">${final.status === "generating" ? "⏳ Generating…" : final.error ? `⚠ ${esc(final.error)}` : "Done"}</span>${final.status === "generating" ? `<span class="status-bar-field">${progressBar()}</span>` : ""}${idx >= 0 ? `<span class="status-bar-field">${idx + 1} of ${names.length}</span>` : ""}` })}
+
     ${win(`@${esc(username)} · Input`, `
-      <div class="toolbar"><a class="btn btn-sm" href="#/dashboard">← Dashboard</a></div>
       <div class="prompt-box">${esc(final.prompt)}</div>
       ${atts.length ? `
         <fieldset class="mt">
@@ -724,17 +783,7 @@ async function viewUser(username, fullscreen = false) {
               : `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-file"><span class="ref-file-icon" aria-hidden="true">${fileIcon(a.name)}</span><span>${esc(a.name)}</span></a>`).join("")}
           </div>
         </fieldset>` : ""}`,
-      { icon: "📝", status: `<span class="status-bar-field">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}
-
-    ${win(`@${esc(username)} · Output`, `
-      <div class="toolbar">
-        <button class="btn btn-sm" id="toggle-code">📄 Show code</button>
-        <button class="btn btn-sm" id="download">💾 Download HTML</button>
-        <a class="btn btn-sm btn-primary" href="#/site/${esc(username)}">Open full screen ↗</a>
-      </div>
-      <iframe id="out" class="preview preview-tall" sandbox="${SANDBOX}" title="@${esc(username)}'s product"></iframe>
-      <pre id="code" class="code" hidden></pre>`,
-      { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow">${final.status === "generating" ? "⏳ Generating…" : final.error ? `⚠ ${esc(final.error)}` : "Done"}</span>${final.status === "generating" ? `<span class="status-bar-field">${progressBar()}</span>` : ""}` })}`;
+      { icon: "📝", status: `<span class="status-bar-field">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}`;
 
   setIframe($("#out"), final.output_html);
   $("#code").textContent = final.output_html || "";
@@ -754,7 +803,8 @@ async function viewUser(username, fullscreen = false) {
 // Router
 // ---------------------------------------------------------------------------
 async function render() {
-  document.body.classList.remove("fullscreen");
+  document.body.classList.remove("fullscreen", "has-max");
+  if (location.hash !== "#/dashboard") clearInterval(state.dashTimer);
   if (!configured) { topbar.innerHTML = ""; return viewNotConfigured(); }
   renderTopbar();
   const route = location.hash.replace(/^#/, "") || "/";

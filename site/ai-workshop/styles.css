@@ -189,6 +189,8 @@ input::placeholder, textarea::placeholder { color: #8a8a8a; }
 .btn:focus-visible { outline: 1px dotted #000; outline-offset: -4px; box-shadow: inset -1px 1px #cee7ff, inset 1px 2px #98b8ea, inset -2px 2px #bcd4f6, inset 1px -1px #89ade4, inset 2px -2px #89ade4; }
 .btn:disabled { color: #aca899; border-color: #c9c7ba; background: #f5f4ea; cursor: default; box-shadow: none; }
 .btn-primary { font-weight: bold; box-shadow: inset -1px 1px #cee7ff, inset 1px 2px #98b8ea, inset -2px 2px #bcd4f6, inset 1px -1px #89ade4, inset 2px -2px #89ade4; }
+.btn.is-disabled { color: #aca899; border-color: #c9c7ba; background: #f5f4ea; box-shadow: none; pointer-events: none; }
+.toolbar-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: #c9c5b3; box-shadow: 1px 0 #fff; }
 .btn-sm { min-width: 0; padding: 2px 8px; font-size: 12px; }
 .form-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
 
