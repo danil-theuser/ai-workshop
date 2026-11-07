@@ -232,6 +232,7 @@ function renderTopbar() {
   const items = [
     { href: "#/", icon: state.profile ? "🖥️" : "🔑", label: state.profile ? "My workspace" : "Sign in" },
     { href: "#/dashboard", icon: "🗂️", label: "Dashboard" },
+    { href: "#/gallery", icon: "🖼️", label: "Inputs & outputs" },
     ...(state.profile ? [{ href: `#/u/${esc(state.profile.username)}`, icon: "👤", label: `@${esc(state.profile.username)}` }] : []),
   ];
   topbar.innerHTML = `
@@ -331,7 +332,7 @@ function viewLogin() {
           </div>
         </form>`}
       </div>`, { icon: "🔑", cls: "narrow logon", controls: false })}
-    <p class="center desktop-link"><a href="#/dashboard">🗂️ Browse what people have built →</a></p>`;
+    <p class="center desktop-link"><a href="#/dashboard">🗂️ Browse what people have built →</a> <a href="#/gallery">🖼️ See inputs &amp; outputs →</a></p>`;
 
   const ef = $("#email-form");
   if (ef) ef.onsubmit = async (e) => {
@@ -636,6 +637,42 @@ async function dashSignature() {
   return `${(ps || []).length}|${(fs || []).map((f) => f.id + f.status).sort().join(",")}`;
 }
 
+
+// Reference files shown under an input (images as thumbnails, others as icons).
+function refsHtml(atts) {
+  if (!atts?.length) return "";
+  return `
+    <fieldset class="mt">
+      <legend>References</legend>
+      <div class="refs">
+        ${atts.map((a) => a.mime?.startsWith("image/")
+          ? `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-img" title="${esc(a.name)}"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy" /><span>${esc(a.name)}</span></a>`
+          : `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-file"><span class="ref-file-icon" aria-hidden="true">${fileIcon(a.name)}</span><span>${esc(a.name)}</span></a>`).join("")}
+      </div>
+    </fieldset>`;
+}
+
+// Checks every 30 s whether finals changed; calls onChange while on `route`.
+function pollForChanges(route, onChange) {
+  clearInterval(state.dashTimer);
+  let sig = null;
+  dashSignature().then((s) => (sig = s)).catch(() => {});
+  state.dashTimer = setInterval(async () => {
+    if (location.hash !== route) return clearInterval(state.dashTimer);
+    if (document.hidden) return;
+    const now = await dashSignature().catch(() => null);
+    if (now && sig && now !== sig) { sig = now; onChange(); }
+  }, DASH_POLL_MS);
+}
+
+// Renders iframes' srcdoc only once they scroll near the viewport.
+function lazyFrames(frames, htmlFor) {
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) { e.target.srcdoc = htmlFor(e.target); io.unobserve(e.target); }
+  }, { rootMargin: "300px" });
+  frames.forEach((f) => io.observe(f));
+}
+
 async function viewDashboard({ refresh = false } = {}) {
   if (!refresh) app.innerHTML = win("Dashboard", `<p>Loading dashboard…</p>${progressBar()}`, { icon: "🗂️", cls: "narrow", controls: false });
   const [{ data: profiles, error: pErr }, { data: finals, error: fErr }] = await Promise.all([
@@ -656,6 +693,8 @@ async function viewDashboard({ refresh = false } = {}) {
       <label class="search-label" for="search">🔍 Search:</label>
       <input id="search" class="search" placeholder="Username or input…" value="${esc(prevQuery)}" />
       <button class="btn btn-sm" id="dash-refresh" title="Refresh">🔄 Refresh</button>
+      <span class="toolbar-sep"></span>
+      <a class="btn btn-sm" href="#/gallery">🖼️ See all inputs &amp; outputs</a>
     </div>
     <div class="gallery" id="gallery">
       ${rows.map((r) => `
@@ -698,17 +737,81 @@ async function viewDashboard({ refresh = false } = {}) {
   search.oninput = applySearch;
   if (prevQuery) applySearch();
 
-  // Polling
-  clearInterval(state.dashTimer);
-  let sig = await dashSignature().catch(() => null);
-  const check = async () => {
-    if (location.hash !== "#/dashboard") return clearInterval(state.dashTimer);
-    if (document.hidden) return;
-    const now = await dashSignature().catch(() => null);
-    if (now && sig && now !== sig) { sig = now; viewDashboard({ refresh: true }); }
-  };
-  state.dashTimer = setInterval(check, DASH_POLL_MS);
+  pollForChanges("#/dashboard", () => viewDashboard({ refresh: true }));
   $("#dash-refresh").onclick = () => viewDashboard({ refresh: true });
+}
+
+
+// Every final submission: the full input next to the live output.
+async function viewGallery() {
+  app.innerHTML = win("Inputs & outputs", `<p>Loading…</p>${progressBar()}`, { icon: "🖼️", cls: "narrow", controls: false });
+  const { data, error } = await sb.from("runs")
+    .select("id, prompt, attachments, status, created_at, model, output_html, profiles(username)")
+    .eq("kind", "final").neq("status", "error").order("created_at", { ascending: true });
+  if (error) throw new Error(error.message);
+  if (location.hash !== "#/gallery") return;
+  const items = (data || []).filter((f) => f.profiles?.username);
+
+  app.innerHTML = `
+    ${win("Inputs & outputs · All submissions", `
+      <div class="toolbar">
+        <label class="search-label" for="search">🔍 Search:</label>
+        <input id="search" class="search" placeholder="Username or input…" />
+        <button class="btn btn-sm" id="g-refresh">🔄 Refresh</button>
+        <span class="toolbar-sep"></span>
+        <a class="btn btn-sm" href="#/dashboard">🗂️ Dashboard</a>
+      </div>
+      <div class="dialog-row">
+        <div class="dialog-icon" aria-hidden="true">🖼️</div>
+        <p>What every participant asked for, next to what Claude built from it. Click into an output to try it. Practice runs stay private; only final submissions are shown.</p>
+      </div>`, {
+        icon: "🖼️", cls: "intro-win",
+        status: `<span class="status-bar-field">${items.length} submission${items.length === 1 ? "" : "s"}</span><span class="status-bar-field grow" id="search-count"></span><span class="status-bar-field" id="g-new" hidden></span>`,
+      })}
+    ${items.map((f, i) => {
+      const u = esc(f.profiles.username);
+      return `<div class="io-item" data-q="${esc((f.profiles.username + " " + f.prompt).toLowerCase())}">
+        ${win(`#${i + 1} · @${u}`, `
+          <div class="io-grid">
+            <div class="io-input">
+              <h3 class="io-label">📝 Input</h3>
+              <div class="prompt-box">${esc(f.prompt)}</div>
+              ${refsHtml(f.attachments)}
+            </div>
+            <div class="io-output">
+              <div class="io-label-row">
+                <h3 class="io-label">🌐 Output</h3>
+                <div class="row">
+                  <a class="btn btn-sm" href="#/u/${u}">Open page</a>
+                  <a class="btn btn-sm btn-primary" href="#/site/${u}">Full screen ↗</a>
+                </div>
+              </div>
+              ${f.output_html ? `<iframe class="preview io-frame" sandbox="${SANDBOX}" data-i="${i}" title="@${u}'s product"></iframe>`
+                : `<div class="io-frame thumb-empty">⏳ Still generating…</div>`}
+            </div>
+          </div>`, {
+          icon: "🌐",
+          status: `<span class="status-bar-field grow">Submitted ${esc(new Date(f.created_at).toLocaleString())}</span>${f.model ? `<span class="status-bar-field">${esc(f.model)}</span>` : ""}`,
+        })}
+      </div>`;
+    }).join("") || win("Nothing yet", `<div class="dialog-row"><div class="dialog-icon" aria-hidden="true">📭</div><p>No final submissions yet. Check back soon.</p></div>`, { icon: "📭", cls: "narrow", controls: false })}`;
+
+  lazyFrames([...document.querySelectorAll(".io-frame[data-i]")], (fr) => items[+fr.dataset.i].output_html);
+
+  const blocks = [...document.querySelectorAll(".io-item")];
+  $("#search").oninput = (e) => {
+    const q = e.target.value.toLowerCase().trim();
+    let shown = 0;
+    blocks.forEach((b) => { const ok = !q || b.dataset.q.includes(q); b.style.display = ok ? "" : "none"; shown += ok; });
+    $("#search-count").textContent = q ? `${shown} match${shown === 1 ? "" : "es"}` : "";
+  };
+  $("#g-refresh").onclick = () => viewGallery();
+  // Don't redraw by itself (that would reset outputs people are playing with);
+  // just say there's something new.
+  pollForChanges("#/gallery", () => {
+    const n = $("#g-new");
+    if (n) { n.hidden = false; n.innerHTML = `✨ New submissions · <a href="#/gallery" id="g-new-link">Refresh</a>`; $("#g-new-link").onclick = (e) => { e.preventDefault(); viewGallery(); }; }
+  });
 }
 
 async function viewUser(username, fullscreen = false) {
@@ -756,9 +859,14 @@ async function viewUser(username, fullscreen = false) {
   const prev = idx > 0 ? names[idx - 1] : null;
   const next = idx >= 0 && idx < names.length - 1 ? names[idx + 1] : null;
 
-  const atts = final.attachments || [];
   app.innerHTML = `
-    ${win(`@${esc(username)}'s product`, `
+    <div class="user-split">
+    ${win(`@${esc(username)} · Input`, `
+      <div class="prompt-box">${esc(final.prompt)}</div>
+      ${refsHtml(final.attachments)}`,
+      { icon: "📝", cls: "user-input", status: `<span class="status-bar-field grow">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}
+
+    ${win(`@${esc(username)} · Output`, `
       <div class="toolbar">
         <a class="btn btn-sm" href="#/dashboard">🗂️ Dashboard</a>
         <a class="btn btn-sm ${prev ? "" : "is-disabled"}" ${prev ? `href="#/u/${esc(prev)}" title="@${esc(prev)}"` : 'aria-disabled="true"'}>◀ Previous</a>
@@ -771,19 +879,7 @@ async function viewUser(username, fullscreen = false) {
       <iframe id="out" class="preview preview-tall" sandbox="${SANDBOX}" title="@${esc(username)}'s product"></iframe>
       <pre id="code" class="code" hidden></pre>`,
       { icon: "🌐", cls: "preview-card", status: `<span class="status-bar-field grow">${final.status === "generating" ? "⏳ Generating…" : final.error ? `⚠ ${esc(final.error)}` : "Done"}</span>${final.status === "generating" ? `<span class="status-bar-field">${progressBar()}</span>` : ""}${idx >= 0 ? `<span class="status-bar-field">${idx + 1} of ${names.length}</span>` : ""}` })}
-
-    ${win(`@${esc(username)} · Input`, `
-      <div class="prompt-box">${esc(final.prompt)}</div>
-      ${atts.length ? `
-        <fieldset class="mt">
-          <legend>References</legend>
-          <div class="refs">
-            ${atts.map((a) => a.mime?.startsWith("image/")
-              ? `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-img" title="${esc(a.name)}"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy" /><span>${esc(a.name)}</span></a>`
-              : `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="ref-file"><span class="ref-file-icon" aria-hidden="true">${fileIcon(a.name)}</span><span>${esc(a.name)}</span></a>`).join("")}
-          </div>
-        </fieldset>` : ""}`,
-      { icon: "📝", status: `<span class="status-bar-field">Submitted ${esc(new Date(final.created_at).toLocaleString())}</span>${final.model ? `<span class="status-bar-field">${esc(final.model)}</span>` : ""}` })}`;
+    </div>`;
 
   setIframe($("#out"), final.output_html);
   $("#code").textContent = final.output_html || "";
@@ -804,13 +900,14 @@ async function viewUser(username, fullscreen = false) {
 // ---------------------------------------------------------------------------
 async function render() {
   document.body.classList.remove("fullscreen", "has-max");
-  if (location.hash !== "#/dashboard") clearInterval(state.dashTimer);
+  if (!["#/dashboard", "#/gallery"].includes(location.hash)) clearInterval(state.dashTimer);
   if (!configured) { topbar.innerHTML = ""; return viewNotConfigured(); }
   renderTopbar();
   const route = location.hash.replace(/^#/, "") || "/";
   try {
     let m;
     if (route === "/dashboard") return await viewDashboard();
+    if (route === "/gallery") return await viewGallery();
     if ((m = route.match(/^\/u\/([a-z0-9_-]+)$/))) return await viewUser(m[1]);
     if ((m = route.match(/^\/site\/([a-z0-9_-]+)$/))) return await viewUser(m[1], true);
     if (!state.session) return viewLogin();
